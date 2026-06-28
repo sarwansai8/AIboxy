@@ -1,0 +1,735 @@
+1.1 TEST PLAN: AI Business Operating System:
+
+TEST_STRATEGY:
+  Approach: "Shift-left" (test early, test often)
+  Coverage_target: 85% code coverage minimum
+  Risk_focus: Financial transactions, data isolation, security
+  Testing_pyramid:
+    Unit_tests: 70% of test suite
+    Integration_tests: 20% of test suite
+    End_to_end_tests: 10% of test suite
+  
+  Testing_phases:
+    Phase_1: Development (CI/CD automated)
+    Phase_2: Staging (manual + automated)
+    Phase_3: Production_smoke_tests (post-deployment)
+
+TEST_ENVIRONMENT_SETUP:
+
+  Development_environment:
+    Database: Docker Postgres (local)
+    Cache: Docker Redis (local)
+    Message_queue: Docker Kafka (local)
+    API_server: Node.js with hot reload
+    Secrets: Local .env file (test credentials)
+    Mock_external_services: Stripe, Gmail, Twitter (mock HTTP servers)
+    Time: ~3 minutes to spin up full stack via docker-compose
+  
+  Staging_environment:
+    Database: AWS RDS Postgres (dedicated staging instance)
+    Cache: AWS ElastiCache Redis (staging cluster)
+    Message_queue: AWS MSK Kafka (staging cluster)
+    API_server: Kubernetes (5 pod replicas, same as prod)
+    Secrets: AWS Secrets Manager (staging credentials)
+    External_services: Real Stripe test API (not mocked)
+    Data: Anonymized production data (for realistic testing)
+    Tear_down: Nightly (cost optimization)
+  
+  Production_environment:
+    No_testing_against_production: STRICT POLICY
+    Smoke_tests_only: Basic health checks (no data modifications)
+    Canary_deployment: 10% traffic for 5 minutes before rollout
+
+TESTING_METRICS:
+
+  Code_coverage:
+    Target: 85% overall
+    Critical_paths: 95% (financial transactions, auth, data isolation)
+    Definition: Lines executed / total lines of code
+    Tool: Istanbul/nyc (JavaScript) OR coverage.py (Python)
+    Enforcement: Fail CI if coverage < threshold
+  
+  Defect_density:
+    Target: < 0.1 defects per 1000 lines of code
+    Tracked: Bugs found in testing vs bugs found in production
+    Goal: Catch 95% of bugs before production
+  
+  Test_execution_time:
+    Unit_tests: < 5 minutes
+    Integration_tests: < 15 minutes
+    Full_suite: < 30 minutes
+    Constraint: Developer feedback loop must be fast
+  
+  Flaky_test_tracking:
+    Definition: Tests that pass sometimes, fail sometimes
+    Threshold: < 1% of test suite
+    Action: Isolate + fix or delete flaky tests
+    
+  Defect_severity_tracking:
+    Critical: System down, data loss, security breach (fix immediately)
+    High: Feature broken, major workaround needed (fix within 24h)
+    Medium: Feature partially broken, workaround exists (fix within 1 week)
+    Low: Minor cosmetic issue (fix when convenient)
+
+TEST_AUTOMATION_FRAMEWORK:
+
+  Unit_testing:
+    Framework: Jest (JavaScript)
+    Structure:
+      ├─ Arrange: Set up test data
+      ├─ Act: Call function under test
+      ├─ Assert: Verify expected behavior
+    
+    Example:
+      describe('AuthService', () => {
+        describe('hashPassword', () => {
+          it('should hash password with bcrypt', () => {
+            // Arrange
+            const password = 'SecurePassword123!'
+            
+            // Act
+            const hash = AuthService.hashPassword(password)
+            
+            // Assert
+            expect(hash).not.toBe(password)  // Not plaintext
+            expect(hash.length).toBeGreaterThan(20)  // Bcrypt output
+            expect(bcrypt.compareSync(password, hash)).toBe(true)
+          })
+          
+          it('should reject passwords < 16 chars', () => {
+            // Arrange
+            const weak_password = 'weak'
+            
+            // Act + Assert
+            expect(() => {
+              AuthService.hashPassword(weak_password)
+            }).toThrow('Password must be minimum 16 characters')
+          })
+        })
+      })
+  
+  Integration_testing:
+    Framework: Supertest (HTTP testing) + Jest
+    Setup:
+      1. Spin up test database
+      2. Run migrations
+      3. Seed test data
+      4. Start API server
+      5. Run tests
+      6. Tear down
+    
+    Example:
+      describe('POST /api/v1/agents/cfo/execute', () => {
+        let app, db
+        
+        beforeAll(async () => {
+          app = require('../app')
+          db = await setupTestDatabase()
+          await db.seed()
+        })
+        
+        afterAll(async () => {
+          await db.tearDown()
+        })
+        
+        it('should successfully execute CFO agent', async () => {
+          const response = await request(app)
+            .post('/api/v1/agents/cfo/execute')
+            .set('Authorization', 'Bearer valid_test_token')
+            .send({
+              task: 'generate_daily_summary',
+              parameters: { period: 'day' }
+            })
+          
+          expect(response.status).toBe(200)
+          expect(response.body.status).toBe('success')
+          expect(response.body.execution_id).toBeDefined()
+          
+          // Verify side effects (invoice created in DB)
+          const invoice = await db.invoices.findLatest()
+          expect(invoice).toBeDefined()
+          expect(invoice.customer_id).toBe('test_customer_id')
+        })
+        
+        it('should reject if authorization fails', async () => {
+          const response = await request(app)
+            .post('/api/v1/agents/cfo/execute')
+            .set('Authorization', 'Bearer invalid_token')
+            .send({ task: 'execute_agent' })
+          
+          expect(response.status).toBe(401)
+          expect(response.body.error.code).toBe('AUTH_FAILED')
+        })
+        
+        it('should fail if customer not found', async () => {
+          const response = await request(app)
+            .post('/api/v1/agents/cfo/execute')
+            .set('Authorization', 'Bearer token_for_deleted_customer')
+            .send({ task: 'execute_agent' })
+          
+          expect(response.status).toBe(404)
+          expect(response.body.error.message).toContain('not found')
+        })
+      })
+  
+  End_to_end_testing:
+    Framework: Playwright / Cypress
+    Scope: Full user workflows (signup → login → execute agent → view results)
+    Environments: Staging only (not production)
+    
+    Example_workflow:
+      Feature: User executes CFO agent and views results
+        Scenario: Successful agent execution
+          Given user is logged in
+          When user clicks "Run CFO Agent"
+          And waits for execution to complete
+          Then dashboard shows new invoice created
+          And metric "Daily Revenue" increased by $5000
+  
+  Load_testing:
+    Framework: Apache JMeter / k6
+    Scenarios:
+      - Ramp-up: Gradual increase to 1000 concurrent users
+      - Sustained: Hold 1000 users for 10 minutes
+      - Spike: Sudden 5x traffic surge (5000 users)
+      - Breakdown: Find maximum capacity (when response time > 5s)
+    
+    Success_criteria:
+      - p95 latency < 200ms (sustained)
+      - Error rate < 0.1%
+      - Database connection pool doesn't exhaust
+      - Memory leaks don't occur
+    
+    Example_test_scenario:
+      stages:
+        - duration: 2m
+          target: 100
+          rampUp: 30s
+        - duration: 10m
+          target: 1000
+          rampUp: 5m
+        - duration: 5m
+          target: 5000
+          rampUp: 30s
+        - duration: 2m
+          target: 0
+
+  Security_testing:
+    Framework: OWASP ZAP (automated) + Burp Suite (manual)
+    Scope: All API endpoints + webapp
+    
+    Automated_scan_checklist:
+      ├─ SQL injection (test special characters: ', --, /*, ../../)
+      ├─ XSS (test HTML/JavaScript injection)
+      ├─ CSRF (test POST without csrf token)
+      ├─ IDOR (test accessing other customer's data)
+      ├─ Broken auth (test expired tokens, modified claims)
+      ├─ Rate limiting (test 1000 requests/sec)
+      ├─ Weak SSL (test TLS 1.0, weak ciphers)
+      └─ Sensitive data exposure (test logs for PII)
+    
+    Manual_pen_testing:
+      Performed: Quarterly by external security firm
+      Cost: $15K–$30K per engagement
+      Duration: 2–3 weeks
+      Scope: Full application + infrastructure + API
+
+      Test Data Management:
+      TEST_DATA_STRATEGY:
+
+  Anonymized_production_data:
+    Collection: Weekly extract from production
+    Anonymization: Remove PII (emails masked, names hashed)
+    Usage: Realistic testing with actual customer patterns
+    Retention: 30 days (then delete)
+    Encryption: AES-256 at rest
+    Access: Developers + QA only (audit logged)
+  
+  Synthetic_test_data:
+    Generation: Faker library (generates realistic but fake data)
+    Customers: 100 test accounts with varying profiles
+    Invoices: 10,000 test invoices (realistic amounts, dates, statuses)
+    Agents: Configured with various settings (approval thresholds, enabled/disabled)
+    Webhooks: Test webhooks from Stripe, Gmail, Twitter
+  
+  Edge_case_test_data:
+    Boundary_values:
+      - Amount: $0.01 (minimum), $999,999.99 (maximum)
+      - Email: Valid + invalid formats
+      - Names: Special characters, Unicode, very long
+    
+    Time_based:
+      - Leap years
+      - Daylight savings time transitions
+      - Year 2038 problem (32-bit integer overflow)
+      - Timezone differences (India + US + EU)
+    
+    Concurrency:
+      - Race conditions (simultaneous invoice creation)
+      - Database locks (two agents accessing same customer data)
+    
+    Error_conditions:
+      - Network timeouts (simulate slow external APIs)
+      - Database disconnection (simulate RDS failover)
+      - Rate limiting (Stripe rejecting requests)
+      - Missing data (deleted customer)
+  
+  Test_data_reset:
+    Timing: Before each integration test run
+    Process:
+      1. Drop all tables
+      2. Run migrations (schema)
+      3. Seed baseline data
+      4. Test runs
+      5. Verify data was modified as expected
+    Cleanup: Automatic (no manual work)
+
+DATABASE_TESTING:
+
+  Transaction_isolation_testing:
+    Test: SERIALIZABLE vs REPEATABLE READ behavior
+    Scenario:
+      1. Customer has balance $1000
+      2. Agent A reads balance (sees $1000)
+      3. Agent B reads balance (sees $1000)
+      4. Agent A deducts $500 (now $500)
+      5. Agent B deducts $300 (should see $500 or fail?)
+      6. Verify: Final balance is $200 (not $700)
+    
+    Implementation:
+      it('should serialize concurrent transactions', async () => {
+        // Create customer with $1000 balance
+        await createCustomer(id='test', balance=100000)  // cents
+        
+        // Simulate two concurrent agents
+        const agent1 = async () => {
+          await db.beginTransaction(SERIALIZABLE)
+          const balance = await db.query('SELECT balance FROM customers WHERE id=?', ['test'])
+          await db.query('UPDATE customers SET balance=? WHERE id=?', [balance - 50000, 'test'])
+          await db.commit()
+        }
+        
+        const agent2 = async () => {
+          await db.beginTransaction(SERIALIZABLE)
+          const balance = await db.query('SELECT balance FROM customers WHERE id=?', ['test'])
+          await db.query('UPDATE customers SET balance=? WHERE id=?', [balance - 30000, 'test'])
+          await db.commit()
+        }
+        
+        // Run concurrently
+        await Promise.all([agent1(), agent2()])
+        
+        // One should fail with serialization error
+        // Other should succeed
+        // Final balance should be $200 (not $700)
+        const final = await db.query('SELECT balance FROM customers WHERE id=?', ['test'])
+        expect(final.balance).toBe(20000)
+      })
+  
+  Backup_restore_testing:
+    Frequency: Monthly
+    Process:
+      1. Create RDS snapshot (from production)
+      2. Restore to test database
+      3. Verify all tables exist
+      4. Run data integrity checks
+      5. Test critical queries
+      6. Delete test database
+    
+    Verification_queries:
+      - SELECT COUNT(*) FROM each table (verify row counts)
+      - SELECT SUM(amount) FROM invoices (verify financial data integrity)
+      - SELECT * FROM audit_logs LIMIT 10 (verify encryption/decryption)
+      - Check foreign keys (no orphaned records)
+  
+  Connection_pool_testing:
+    Simulate: Database connection exhaustion
+    Test:
+      1. Create 500 connections (max pool size)
+      2. Try to create 501st connection
+      3. Verify: Queued or timeout (not crash)
+      4. Release connection #1
+      5. Verify: Connection #501 accepted
+    
+    Implementation:
+      it('should handle connection pool exhaustion gracefully', async () => {
+        const connections = []
+        
+        // Exhaust pool
+        for (let i = 0; i < 500; i++) {
+          const conn = await db.getConnection()
+          connections.push(conn)
+        }
+        
+        // Try to get one more (should queue)
+        const promise = db.getConnection({ timeout: 5000 })
+        
+        // Wait 100ms (still queued, not connected)
+        await sleep(100)
+        expect(promise).not.toResolve()  // Not done yet
+        
+        // Release a connection
+        await connections[0].release()
+        
+        // Now promise should resolve
+        const conn = await promise
+        expect(conn).toBeDefined()
+      })
+
+
+      1.2 TEST CASES & MATRICES: AI Business Operating System:
+      TEST_CASE_SUITE_1: AUTHENTICATION & AUTHORIZATION
+
+  TC_AUTH_001: Valid_login
+    Preconditions:
+      - Customer registered with email "test@example.com"
+      - Password hashed and stored in database
+    Steps:
+      1. POST /api/v1/auth/login
+         { email: "test@example.com", password: "SecurePassword123!" }
+      2. Verify response status = 200
+      3. Verify response contains auth_token (JWT)
+      4. Verify response contains refresh_token (JWT)
+    Expected_result: Login successful, tokens issued
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (unit test)
+  
+  TC_AUTH_002: Invalid_password
+    Preconditions:
+      - Same customer as TC_AUTH_001
+    Steps:
+      1. POST /api/v1/auth/login
+         { email: "test@example.com", password: "WrongPassword" }
+      2. Verify response status = 401
+      3. Verify error code = "AUTH_FAILED"
+      4. Verify message does NOT reveal if email exists
+    Expected_result: Login rejected, no information leak
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (unit test)
+  
+  TC_AUTH_003: Account_lockout_after_5_failures
+    Preconditions:
+      - Customer account exists
+    Steps:
+      1. POST /api/v1/auth/login with wrong password (5 times)
+      2. Verify account is locked after 5th attempt
+      3. Attempt login with correct password
+      4. Verify response = 403 "Account locked"
+      5. Wait 30 minutes (simulated via time travel in test)
+      6. Attempt login again
+      7. Verify login now succeeds
+    Expected_result: Account locked, then unlocked after timeout
+    Risk_level: HIGH
+    Automation: AUTOMATED (integration test)
+  
+  TC_AUTH_004: MFA_enforcement
+    Preconditions:
+      - Customer has MFA enabled
+      - TOTP authenticator seeded with secret
+    Steps:
+      1. POST /api/v1/auth/login { email, password }
+      2. Response = 403 "MFA required"
+      3. Response contains challenge_id
+      4. POST /api/v1/auth/mfa/verify
+         { challenge_id, mfa_code: "invalid_code" }
+      5. Verify response = 401 "Invalid MFA code"
+      6. Try again with valid 6-digit code from authenticator
+      7. Verify response = 200 "MFA verified"
+      8. Response now contains auth_token
+    Expected_result: MFA enforced, only valid codes accepted
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test with time-synced TOTP)
+  
+  TC_AUTH_005: JWT_signature_verification
+    Preconditions:
+      - Valid auth_token obtained
+    Steps:
+      1. Modify JWT payload (change user_id to different customer)
+      2. Attempt API call with modified JWT
+      3. Verify signature verification fails
+      4. Verify response = 401 "Invalid token"
+    Expected_result: Token tampering detected, rejected
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (unit test)
+  
+  TC_AUTH_006: Expired_token_rejection
+    Preconditions:
+      - auth_token with exp = 1 hour ago
+    Steps:
+      1. Attempt API call with expired token
+      2. Verify response = 401 "Token expired"
+      3. Attempt token refresh with old token
+      4. Verify refresh fails with "Token expired"
+      5. User must re-login
+    Expected_result: Expired tokens rejected
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (unit test)
+  
+  TEST_MATRIX_AUTHORIZATION:
+    
+    | User Role           | Can Execute Agent | Can View Financial Data | Can Delete Account | Expected Result |
+    |---------------------|-------------------|-------------------------|--------------------|--------------------|
+    | Account Owner       | Yes               | Yes                     | Yes (with MFA)    | ✓ PASS            |
+    | Finance Team Member | Yes               | Yes (if role permits)   | No                | ✓ PASS            |
+    | API Client          | Yes (scoped)      | No                      | No                | ✓ PASS            |
+    | Deleted User        | No                | No                      | N/A               | ✓ DENIED          |
+    | Expired Session     | No                | No                      | No                | ✓ DENIED          |
+    | Wrong Customer ID   | No (403)          | No (403)                | N/A               | ✓ DENIED          |
+
+TEST_CASE_SUITE_2: FINANCIAL_DATA_INTEGRITY
+
+  TC_FIN_001: Invoice_creation_with_valid_data
+    Preconditions:
+      - CFO agent executed (via mock Stripe webhook)
+      - Payment amount: $50 USD (5000 cents)
+    Steps:
+      1. CFO agent receives payment_received event
+      2. Agent validates amount (> 0, < $1M)
+      3. Agent creates invoice in database
+      4. Verify invoice exists: SELECT * FROM invoices WHERE stripe_charge_id=?
+      5. Verify fields:
+         - amount_cents = 5000
+         - status = "paid"
+         - created_at = now() (within 1 second)
+      6. Verify Google Sheets updated (via webhook callback verification)
+      7. Verify Redis cache updated: metrics:customer_id:daily_revenue:YYYY-MM-DD
+    Expected_result: Invoice created, all side effects executed
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test)
+  
+  TC_FIN_002: Duplicate_payment_detection
+    Preconditions:
+      - Same payment received twice (race condition simulation)
+    Steps:
+      1. Create invoice for stripe_charge_id = "ch_123"
+      2. Attempt to create another invoice with same stripe_charge_id
+      3. Verify response = 409 "Duplicate payment"
+      4. Verify only ONE invoice in database
+      5. Verify no double-counting in metrics
+    Expected_result: Duplicate payment rejected, data integrity maintained
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test)
+  
+  TC_FIN_003: Negative_amount_rejection
+    Preconditions:
+      - Malformed webhook data
+    Steps:
+      1. CFO agent receives payment_received event with amount_cents = -5000
+      2. Verify validation rejects negative amount
+      3. Verify response = 400 "Invalid amount"
+      4. Verify no invoice created
+    Expected_result: Validation prevents negative invoices
+    Risk_level: HIGH
+    Automation: AUTOMATED (unit test)
+  
+  TC_FIN_004: Transaction_isolation_financial_update
+    Preconditions:
+      - Two agents attempting to update same customer P&L
+    Steps:
+      1. Agent A starts transaction: SERIALIZABLE isolation
+      2. Agent B starts transaction: SERIALIZABLE isolation
+      3. Both attempt to update total_revenue
+      4. One should succeed, one should fail with serialization error
+      5. Retry fails, customer P&L is consistent (no double-counting)
+    Expected_result: Financial data integrity maintained under concurrent load
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (concurrency test)
+
+TEST_CASE_SUITE_3: DATA_ISOLATION (MULTI_TENANCY)
+
+  TC_ISO_001: Cross_tenant_access_prevention
+    Preconditions:
+      - Customer A with invoices
+      - Customer B (attacker attempting to read A's data)
+    Steps:
+      1. Login as Customer B
+      2. Attempt GET /api/v1/customers/customer_a_id/invoices
+      3. Verify response = 403 "Forbidden"
+      4. Verify error message does NOT reveal that customer A exists
+      5. Audit log shows: event=authorization_denied, user=customer_b, reason=cross_tenant
+    Expected_result: Cross-tenant access blocked, no information leak
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test)
+  
+  TC_ISO_002: SQL_injection_attempt
+    Preconditions:
+      - Attacker knows API structure
+    Steps:
+      1. POST /api/v1/financial/invoices
+         { amount: "5000", description: "'; DROP TABLE invoices; --" }
+      2. Verify payload rejected OR safely escaped
+      3. Verify no tables dropped
+      4. Verify error message sanitized (no stack trace)
+    Expected_result: SQL injection prevented, system stable
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (security test, OWASP ZAP)
+  
+  TC_ISO_003: Field_level_encryption_verification
+    Preconditions:
+      - Customer email stored in database
+    Steps:
+      1. Query database directly (bypass app layer)
+      2. Retrieve customer email column
+      3. Verify email is encrypted (not plaintext)
+      4. Verify encryption format: base64(nonce || ciphertext || tag)
+      5. Attempt to decrypt with wrong key
+      6. Verify decryption fails
+      7. Decrypt with correct key
+      8. Verify plaintext matches original email
+    Expected_result: Encryption enforced at database level
+    Risk_level: HIGH
+    Automation: AUTOMATED (integration test)
+  
+  TC_ISO_004: Audit_log_access_control
+    Preconditions:
+      - Audit logs contain cross-customer data (for SIEM)
+    Steps:
+      1. Customer A attempts to view audit logs
+      2. Verify API filters results: only show Customer A's logs
+      3. Attempt direct database query (SELECT * FROM audit_logs)
+      4. Verify RLS (Row-Level Security) enforced
+      5. Verify Customer A cannot see Customer B's logs
+    Expected_result: RLS prevents cross-tenant data leakage
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test with database-level security)
+
+TEST_CASE_SUITE_4: AGENT_ORCHESTRATION
+
+  TC_AGENT_001: CFO_agent_execution_success
+    Preconditions:
+      - Payment webhook from Stripe received
+      - CFO agent enabled and configured
+    Steps:
+      1. OrchestrationEngine.ProcessEvent(payment_received)
+      2. Verify Agent dispatched to CFO service
+      3. Verify execution_context created in database
+      4. Verify agent executes within timeout (30s)
+      5. Verify output: { status: "invoice_created", invoice_id: uuid }
+      6. Verify webhook published to Kafka
+      7. Verify async processes queued (email send, metric aggregation)
+    Expected_result: CFO agent executes successfully, side effects queued
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test)
+  
+  TC_AGENT_002: Agent_timeout_handling
+    Preconditions:
+      - CFO agent stuck (infinite loop or external API hang)
+    Steps:
+      1. CFO agent starts execution
+      2. Simulate timeout (wait 31 seconds)
+      3. Verify agent killed (timeout = 30s)
+      4. Verify partial transaction rolled back (no half-done work)
+      5. Verify error logged
+      6. Verify user notified (via dashboard or email)
+    Expected_result: Timeout prevents hanging, data consistency maintained
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (timeout test)
+  
+  TC_AGENT_003: Agent_failure_recovery
+    Preconditions:
+      - External service (Stripe API) temporarily unavailable
+    Steps:
+      1. CFO agent calls Stripe API
+      2. Verify response = 503 Service Unavailable
+      3. Verify circuit breaker captures error
+      4. Verify automatic retry (exponential backoff: 1s, 10s, 100s)
+      5. If all retries fail: Queue for later
+      6. Verify user NOT blocked (async operation)
+    Expected_result: Transient failures don't break user experience
+    Risk_level: HIGH
+    Automation: AUTOMATED (resilience test)
+  
+  TC_AGENT_004: Approval_threshold_enforcement
+    Preconditions:
+      - Customer A configured: auto_approve_threshold = $1000
+      - Transaction amount = $5000 (exceeds threshold)
+    Steps:
+      1. CFO agent processes $5000 transaction
+      2. Verify approval_required = true
+      3. Verify pending_approvals table entry created
+      4. Verify dashboard shows "Approval Needed"
+      5. Verify email sent to Account Owner
+      6. Account Owner approves via dashboard
+      7. Verify transaction executes (invoice created, etc)
+    Expected_result: Approval workflow enforced, audit trail created
+    Risk_level: CRITICAL
+    Automation: AUTOMATED (integration test)
+
+TEST_CASE_SUITE_5: RATE_LIMITING_&_ABUSE_PREVENTION
+
+  TC_RATE_001: Per_customer_rate_limit_enforcement
+    Preconditions:
+      - Rate limit: 1000 requests/minute per customer
+    Steps:
+      1. Send 1001 requests within 60 seconds
+      2. Verify first 1000 succeed (status 200)
+      3. Verify request 1001 rejected (status 429 Too Many Requests)
+      4. Verify response includes Retry-After header
+      5. Verify rate_limit:customer_id:bucket tokens reset after 60s
+      6. Verify next request succeeds (after timeout)
+    Expected_result: Rate limiting enforced per customer
+    Risk_level: HIGH
+    Automation: AUTOMATED (load test)
+  
+  TC_RATE_002: API_key_rotation_enforcement
+    Preconditions:
+      - API key created 90 days ago
+      - Current date: 90 days + 1 day (expired)
+    Steps:
+      1. Attempt API call with expired key
+      2. Verify response = 403 "API key expired"
+      3. Generate new API key
+      4. Verify API call succeeds with new key
+      5. Verify audit log: api_key_rotated event
+    Expected_result: Expired keys rejected, rotation enforced
+    Risk_level: HIGH
+    Automation: AUTOMATED (integration test with time travel)
+  
+  TC_RATE_003: Brute_force_attack_detection
+    Preconditions:
+      - Attacker sends 100 failed login attempts in 1 minute
+    Steps:
+      1. Send 10 failed login attempts
+      2. Verify IP tracked
+      3. Send 100+ failed attempts (exceeds threshold)
+      4. Verify IP added to temporary blocklist
+      5. Verify subsequent requests from IP immediately rejected (without processing)
+      6. Wait 24 hours (simulated)
+      7. Verify IP removed from blocklist
+    Expected_result: Brute force attacks blocked
+    Risk_level: HIGH
+    Automation: AUTOMATED (security test)
+
+TEST_MATRIX_SUMMARY:
+
+  | Test Case ID | Feature              | Normal Case | Edge Case | Error Case | Automation | Status    |
+  |--------------|----------------------|-------------|-----------|------------|------------|-----------|
+  | TC_AUTH_001  | Login                | ✓ PASS      | -         | -          | ✓ Auto     | ✓ PASS    |
+  | TC_AUTH_002  | Invalid Password     | -           | -         | ✓ FAIL     | ✓ Auto     | ✓ PASS    |
+  | TC_AUTH_003  | Account Lockout      | -           | ✓ 5 tries | -          | ✓ Auto     | ✓ PASS    |
+  | TC_FIN_001   | Invoice Creation     | ✓ $50       | $0.01, $999K | -        | ✓ Auto     | ✓ PASS    |
+  | TC_FIN_002   | Duplicate Prevention | -           | Race cond | -          | ✓ Auto     | ✓ PASS    |
+  | TC_ISO_001   | Cross-tenant Block   | -           | -         | ✓ DENY     | ✓ Auto     | ✓ PASS    |
+  | TC_AGENT_001 | Agent Execution      | ✓ Success   | -         | -          | ✓ Auto     | ✓ PASS    |
+  | TC_AGENT_002 | Timeout Handling     | -           | 31s exec  | ✓ Kill     | ✓ Auto     | ✓ PASS    |
+  | TC_RATE_001  | Rate Limiting        | 1000 OK     | 1001 BLOCK| -          | ✓ Auto     | ✓ PASS    |
+
+REGRESSION_TEST_SUITE:
+
+  Executed: After every deployment to staging
+  Duration: 30 minutes
+  Scope: All critical paths + previous bug fixes
+  
+  Tests_included:
+    - Previous 10 bugs (ensure not reintroduced)
+    - Critical workflows (login, agent execution, finance)
+    - Security checks (SQL injection, CSRF, IDOR)
+    - Performance baselines (latency < 200ms, error rate < 0.1%)
+  
+  Failure_handling:
+    If any regression test fails:
+      1. Block production deployment
+      2. Alert engineer
+      3. Investigate root cause
+      4. Fix + retry
+      5. Document lesson learned

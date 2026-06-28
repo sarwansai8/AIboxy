@@ -1,0 +1,336 @@
+System Architecture (Kubernetes-Native):
+DEPLOYMENT_TOPOLOGY:
+
+  KUBERNETES_CLUSTER:
+    Provider: AWS EKS (managed Kubernetes)
+    Version: 1.28+ (latest stable)
+    Multi-AZ: Yes (3 availability zones for HA)
+    
+    Node pools:
+      system_pool:
+        nodes: 3 (one per AZ)
+        instance_type: t3.medium (2 vCPU, 4 GB RAM)
+        autoscaling: min=3, max=10
+        purpose: System pods (CoreDNS, monitoring, logging)
+      
+      application_pool:
+        nodes: 5 (spread across 3 AZs)
+        instance_type: c5.xlarge (4 vCPU, 8 GB RAM)
+        autoscaling: min=5, max=50 (auto-scale on CPU/memory)
+        purpose: API servers, agent workers
+      
+      database_pool:
+        nodes: 3 (dedicated for Postgres operator)
+        instance_type: m5.2xlarge (8 vCPU, 32 GB RAM)
+        autoscaling: min=3, max=3 (fixed for consistency)
+        purpose: PostgreSQL databases (one per customer)
+
+  NETWORK_ARCHITECTURE:
+    
+    VPC:
+      CIDR: 10.0.0.0/16
+      Subnets:
+        public_1a: 10.0.1.0/24 (Availability Zone A)
+        public_1b: 10.0.2.0/24 (Availability Zone B)
+        public_1c: 10.0.3.0/24 (Availability Zone C)
+        private_1a: 10.0.101.0/24 (K8s pods in AZ A)
+        private_1b: 10.0.102.0/24 (K8s pods in AZ B)
+        private_1c: 10.0.103.0/24 (K8s pods in AZ C)
+        database_1a: 10.0.201.0/24 (PostgreSQL, AZ A)
+        database_1b: 10.0.202.0/24 (PostgreSQL, AZ B)
+        database_1c: 10.0.203.0/24 (PostgreSQL, AZ C)
+
+    Security_Groups:
+      alb_sg:
+        inbound:
+          - 443 (HTTPS) from 0.0.0.0/0
+          - 80 (HTTP) from 0.0.0.0/0 (redirect only)
+        outbound:
+          - 8080 to api_pod_sg
+      
+      api_pod_sg:
+        inbound:
+          - 8080 from alb_sg
+        outbound:
+          - 5432 to postgres_sg (database)
+          - 6379 to redis_sg (cache)
+          - 443 to 0.0.0.0/0 (external APIs)
+      
+      postgres_sg:
+        inbound:
+          - 5432 from api_pod_sg
+          - 5432 from backup_sg (snapshots only)
+        outbound: NONE (no outbound traffic)
+      
+      redis_sg:
+        inbound:
+          - 6379 from api_pod_sg
+        outbound: NONE
+
+  KUBERNETES_MANIFESTS:
+    
+    namespace:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: aibos-prod
+        labels:
+          environment: production
+    
+    network_policies:
+      # Restrict traffic between pods
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: api-to-db-only
+        namespace: aibos-prod
+      spec:
+        podSelector:
+          matchLabels:
+            app: api-server
+        policyTypes:
+        - Egress
+        egress:
+        - to:
+          - podSelector:
+              matchLabels:
+                app: postgres
+          ports:
+          - protocol: TCP
+            port: 5432
+        - to:
+          - podSelector:
+              matchLabels:
+                app: redis
+          ports:
+          - protocol: TCP
+            port: 6379
+        - to:
+          - namespaceSelector: {}  # Allow DNS
+          ports:
+          - protocol: UDP
+            port: 53
+    
+    pod_security_policy:
+      apiVersion: policy/v1beta1
+      kind: PodSecurityPolicy
+      metadata:
+        name: restricted
+      spec:
+        privileged: false
+        allowPrivilegeEscalation: false
+        requiredDropCapabilities:
+        - ALL
+        runAsUser:
+          rule: 'MustRunAsNonRoot'
+        runAsGroup:
+          rule: 'MustRunAs'
+          ranges:
+          - min: 1000
+            max: 65535
+        seLinux:
+          rule: 'MustRunAs'
+          seLinuxOptions:
+            level: 's0:c123,c456'
+        supplementalGroups:
+          rule: 'RunAsAny'
+        fsGroup:
+          rule: 'MustRunAs'
+          ranges:
+          - min: 1000
+            max: 65535
+        readOnlyRootFilesystem: false
+        volumes:
+        - 'configMap'
+        - 'emptyDir'
+        - 'projected'
+        - 'secret'
+        - 'persistentVolumeClaim'
+    
+    deployment_api_server:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api-server
+        namespace: aibos-prod
+      spec:
+        replicas: 5
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxUnavailable: 1
+            maxSurge: 1
+        selector:
+          matchLabels:
+            app: api-server
+        template:
+          metadata:
+            labels:
+              app: api-server
+            annotations:
+              prometheus.io/scrape: 'true'
+              prometheus.io/port: '9090'
+              prometheus.io/path: '/metrics'
+          spec:
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                      - key: app
+                        operator: In
+                        values:
+                        - api-server
+                    topologyKey: kubernetes.io/hostname
+            
+            containers:
+            - name: api
+              image: ecr.amazonaws.com/aibos/api-server:v1.0.0
+              imagePullPolicy: IfNotPresent
+              
+              ports:
+              - name: http
+                containerPort: 8080
+                protocol: TCP
+              - name: metrics
+                containerPort: 9090
+                protocol: TCP
+              
+              env:
+              - name: NODE_ENV
+                value: "production"
+              - name: DATABASE_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: api-secrets
+                    key: database-url
+              - name: REDIS_URL
+                valueFrom:
+                  secretKeyRef:
+                    name: api-secrets
+                    key: redis-url
+              
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 512Mi
+                limits:
+                  cpu: 2000m
+                  memory: 2Gi
+              
+              livenessProbe:
+                httpGet:
+                  path: /health/live
+                  port: 8080
+                initialDelaySeconds: 10
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              
+              readinessProbe:
+                httpGet:
+                  path: /health/ready
+                  port: 8080
+                initialDelaySeconds: 5
+                periodSeconds: 5
+                timeoutSeconds: 3
+                failureThreshold: 2
+              
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                capabilities:
+                  drop:
+                  - ALL
+            
+            securityContext:
+              fsGroup: 1000
+            
+            serviceAccountName: api-server
+    
+    horizontal_pod_autoscaler:
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: api-server-hpa
+        namespace: aibos-prod
+      spec:
+        scaleTargetRef:
+          apiVersion: apps/v1
+          kind: Deployment
+          name: api-server
+        minReplicas: 5
+        maxReplicas: 50
+        metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+        - type: Resource
+          resource:
+            name: memory
+            target:
+              type: Utilization
+              averageUtilization: 80
+    
+    pod_disruption_budget:
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: api-server-pdb
+        namespace: aibos-prod
+      spec:
+        minAvailable: 3  # Always keep at least 3 pods running
+        selector:
+          matchLabels:
+            app: api-server
+    
+    service:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: api-server
+        namespace: aibos-prod
+      spec:
+        type: ClusterIP
+        selector:
+          app: api-server
+        ports:
+        - port: 80
+          targetPort: 8080
+          protocol: TCP
+    
+    ingress:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: api-ingress
+        namespace: aibos-prod
+        annotations:
+          kubernetes.io/ingress.class: alb
+          alb.ingress.kubernetes.io/scheme: internet-facing
+          alb.ingress.kubernetes.io/target-type: ip
+          alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:...
+          alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+      spec:
+        tls:
+        - hosts:
+          - api.saivio-ai.com
+          secretName: api-tls-cert
+        rules:
+        - host: api.saivio-ai.com
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: api-server
+                  port:
+                    number: 80

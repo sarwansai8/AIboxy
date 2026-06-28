@@ -1,0 +1,794 @@
+# AI Business Operating System - Developer Setup Guide
+
+## Quick Start (5 minutes)
+
+### Prerequisites
+- Node.js 20.x LTS
+- Docker + Docker Compose
+- Git
+- AWS CLI (optional, for cloud deployment)
+
+### Installation
+
+1. Clone repository
+```bash
+git clone https://github.com/saivio/aibos.git
+cd aibos
+```
+
+2. Install dependencies
+```bash
+npm install
+```
+
+3. Start development environment
+```bash
+docker-compose up -d  # Start Postgres, Redis, Kafka
+npm run dev           # Start API server with hot reload
+```
+
+4. Verify setup
+```bash
+curl http://localhost:3000/health
+# Response: { "status": "ok", "timestamp": "2024-01-15T10:30:00Z" }
+```
+
+## Project Structure
+aibos/
+
+├── src/
+
+│   ├── api/                 # Express.js API routes
+
+│   │   ├── auth/            # Authentication endpoints
+
+│   │   ├── agents/          # Agent orchestration endpoints
+
+│   │   ├── financial/       # Financial data endpoints
+
+│   │   └── middleware/      # Auth, logging, error handling
+
+│   ├── lib/
+
+│   │   ├── orchestration/   # Orchestration engine
+
+│   │   ├── agents/          # Agent implementations (CFO, Marketing, etc)
+
+│   │   ├── db/              # Database utilities
+
+│   │   ├── cache/           # Redis utilities
+
+│   │   └── encryption/      # Encryption/decryption
+
+│   ├── types/               # TypeScript types
+
+│   └── index.ts             # Entry point
+
+├── tests/
+
+│   ├── unit/                # Unit tests (Jest)
+
+│   ├── integration/         # Integration tests
+
+│   ├── security/            # Security tests
+
+│   └── fixtures/            # Test data
+
+├── db/
+
+│   ├── migrations/          # Database migrations (Knex)
+
+│   ├── seeds/               # Test data seeds
+
+│   └── schema.sql           # Full schema
+
+├── k8s/                     # Kubernetes manifests
+
+├── docker-compose.yml       # Development environment
+
+├── .env.example             # Environment variables template
+
+└── README.md                # This file
+
+## Configuration
+
+Create `.env` file (copy from `.env.example`)
+
+```bash
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/aibos_dev
+DATABASE_POOL_SIZE=20
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Kafka
+KAFKA_BROKERS=localhost:9092
+
+# Secrets
+JWT_PRIVATE_KEY=<base64-encoded-private-key>
+JWT_PUBLIC_KEY=<base64-encoded-public-key>
+ENCRYPTION_MASTER_KEY=<base64-encoded-key>
+
+# External APIs
+STRIPE_TEST_KEY=sk_test_...
+CLAUDE_API_KEY=sk-...
+GMAIL_API_KEY=...
+
+# Logging
+LOG_LEVEL=debug
+```
+
+## Running Tests
+
+```bash
+# Unit tests
+npm test
+
+# With coverage
+npm test -- --coverage
+
+# Integration tests (requires Docker Postgres)
+npm run test:integration
+
+# Security tests (OWASP ZAP)
+npm run test:security
+
+# E2E tests (requires staging environment)
+npm run test:e2e
+```
+
+## Development Workflow
+
+### 1. Create feature branch
+```bash
+git checkout -b feature/agent-approval-workflow
+```
+
+### 2. Make changes and test locally
+```bash
+npm run dev       # API server with hot reload
+npm test          # Run tests (auto-rerun on changes)
+```
+
+### 3. Commit and push
+```bash
+git add src/
+git commit -m "feat: add agent approval workflow
+
+- Agents can now require approval for transactions > $1000
+- New endpoint: POST /api/v1/agents/{id}/approve
+- Audit log captures all approvals"
+
+git push origin feature/agent-approval-workflow
+```
+
+### 4. Create pull request
+- Use GitHub UI: https://github.com/saivio/aibos/pull/new
+- Require 2 approvals before merge
+- Automated checks must pass:
+  - ✓ Unit tests
+  - ✓ Linting (ESLint)
+  - ✓ Type checking (TypeScript)
+  - ✓ Code coverage (>80%)
+  - ✓ Security scanning (Snyk, OWASP)
+
+### 5. Code review feedback
+- Address PR comments
+- Re-request review once changes made
+- CI/CD re-runs automatically
+
+### 6. Merge and deploy
+- Green checkmarks = ready to merge
+- Merge to main (requires approved reviews)
+- CI/CD automatically deploys to staging
+- Test in staging environment
+- DevOps approves production deployment
+
+## Debugging
+
+### Check logs
+```bash
+# API server logs
+docker-compose logs -f api
+
+# Database logs
+docker-compose logs -f postgres
+
+# Redis logs
+docker-compose logs -f redis
+```
+
+### Database inspection
+```bash
+# Connect to database
+psql postgresql://user:password@localhost:5432/aibos_dev
+
+# Useful queries
+SELECT * FROM customers LIMIT 10;
+SELECT COUNT(*) FROM invoices;
+SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 10;
+```
+
+### API testing
+```bash
+# Login
+curl -X POST http://localhost:3000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "SecurePassword123!"
+  }'
+
+# Execute agent (requires auth token)
+curl -X POST http://localhost:3000/api/v1/agents/cfo/execute \
+  -H "Authorization: Bearer <auth_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "generate_daily_summary",
+    "parameters": { "period": "day" }
+  }'
+```
+
+## Troubleshooting
+
+### "Connection refused" errors
+```bash
+# Check Docker containers are running
+docker-compose ps
+
+# Restart Docker
+docker-compose down
+docker-compose up -d
+```
+
+### "Database migration failed"
+```bash
+# Check migration status
+npx knex migrate:status
+
+# Rollback and retry
+npx knex migrate:rollback
+npx knex migrate:latest
+```
+
+### "Tests failing locally but passing in CI"
+```bash
+# Run tests in Docker (matches CI environment)
+docker-compose exec api npm test
+
+# Check environment variables
+env | grep -E "(DATABASE|REDIS|KAFKA)"
+```
+
+## Useful Commands
+
+```bash
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Run tests
+npm test
+
+# Run linter
+npm run lint
+
+# Fix linting errors
+npm run lint:fix
+
+# Type check
+npm run typecheck
+
+# Build for production
+npm run build
+
+# Database migrations
+npx knex migrate:make <migration_name>
+npx knex migrate:latest
+npx knex migrate:rollback
+
+# Seed database
+npx knex seed:make <seed_name>
+npx knex seed:run
+
+# Generate OpenAPI schema
+npm run generate:api-docs
+
+# Docker commands
+docker-compose up -d       # Start all services
+docker-compose down        # Stop all services
+docker-compose logs -f     # View logs
+docker-compose exec postgres psql  # Connect to database
+```
+
+## Performance Considerations
+
+### Optimize database queries
+```typescript
+// ❌ BAD: N+1 query problem
+const customers = await db.customers.findAll();
+for (const customer of customers) {
+  customer.invoices = await db.invoices.findByCustomerId(customer.id);
+}
+
+// ✅ GOOD: Join in single query
+const customers = await db.customers.findAll({
+  include: ['invoices']
+});
+```
+
+### Use pagination for large datasets
+```typescript
+// ❌ BAD: Load all 1M invoices
+const invoices = await db.invoices.findAll();
+
+// ✅ GOOD: Paginate
+const invoices = await db.invoices.findAll({
+  limit: 100,
+  offset: 0
+});
+```
+
+### Cache frequently accessed data
+```typescript
+// Use Redis for metrics
+const monthlyRevenue = await redis.get('metrics:customer_id:revenue:2024-01');
+if (!monthlyRevenue) {
+  monthlyRevenue = await db.calculateMonthlyRevenue(customerId, '2024-01');
+  await redis.setex('metrics:...', 86400, monthlyRevenue); // 24-hour TTL
+}
+```
+
+## Contributing Guidelines
+
+1. **Code Style**: Follow ESLint configuration
+2. **Commit Messages**: Use Conventional Commits format
+3. **Pull Requests**: Describe what and why (not how)
+4. **Documentation**: Update README if adding features
+5. **Tests**: Write tests for new features (minimum 80% coverage)
+6. **Security**: Never commit secrets, API keys, or credentials
+
+## Support & Resources
+
+- **Documentation**: https://docs.saivio-ai.com
+- **Architecture Diagrams**: https://github.com/saivio/aibos/wiki
+- **Issues**: https://github.com/saivio/aibos/issues
+- **Slack**: #engineering channel
+- **Contact**: engineering@saivio-ai.com
+
+---
+
+## License
+
+Proprietary - All rights reserved (SAIVIO)
+
+3.2 USER MANUAL: Customer Dashboard & Admin Guide
+# AI Business Operating System - User Manual
+
+## Table of Contents
+1. Getting Started
+2. Dashboard Overview
+3. Agent Management
+4. Financial Data
+5. Team Management
+6. Settings & Security
+7. FAQ & Troubleshooting
+
+---
+
+## 1. GETTING STARTED
+
+### Signing Up
+
+1. Visit https://app.saivio-ai.com/signup
+2. Enter your email address
+3. Create a strong password (minimum 16 characters)
+4. Verify your email (link sent within 5 minutes)
+5. Set up your company profile
+
+**Password Requirements:**
+- Minimum 16 characters
+- Include uppercase letters (A-Z)
+- Include lowercase letters (a-z)
+- Include numbers (0-9)
+- Include special characters (!@#$%^&*)
+
+### Your First Login
+
+1. Visit https://app.saivio-ai.com/login
+2. Enter email + password
+3. If MFA enabled: Enter 6-digit code from authenticator app
+4. You're in! Dashboard loads
+
+### Setting Up Multi-Factor Authentication (MFA)
+
+**Recommended:** Enable MFA for account security
+
+Steps:
+1. Click **Settings** (top right)
+2. Click **Security** → **Enable MFA**
+3. Scan QR code with authenticator app (Google Authenticator, Authy, Microsoft Authenticator)
+4. Enter 6-digit code to verify
+5. Save backup codes (store securely!)
+
+**Backup Codes:**
+- Used if you lose access to authenticator app
+- Single-use only
+- Store in password manager (1Password, Bitwarden)
+
+---
+
+## 2. DASHBOARD OVERVIEW
+
+### Key Metrics
+
+**Daily Summary** (top section)
+- **Daily Revenue**: Total money received today
+- **Active Invoices**: Number of pending invoices
+- **Expenses Today**: Total expenses recorded
+- **Agents Running**: Number of active automation tasks
+
+**7-Day Trends** (charts)
+- Revenue trend (increasing/decreasing)
+- Invoice creation rate
+- Expense trends
+- Agent success rate
+
+### Navigation
+
+- **Agents**: Manage and execute automation agents
+- **Financial**: View invoices, expenses, forecasts
+- **Team**: Manage team members and permissions
+- **Audit Logs**: View all system activities
+- **Settings**: Change account settings
+
+---
+
+## 3. AGENT MANAGEMENT
+
+### What are Agents?
+
+Agents are AI-powered automation tasks that handle business functions:
+
+- **CFO Agent**: Manages invoices, tracks revenue, generates financial reports
+- **Marketing Agent**: Creates social media posts, analyzes engagement
+- **Sales Agent**: Qualifies leads, sends follow-up emails, tracks pipeline
+- **Operations Agent**: Processes tasks, manages meetings, assigns work
+- **CEO Agent**: Generates business insights, identifies bottlenecks
+
+### Running an Agent Manually
+
+1. Click **Agents** in sidebar
+2. Choose agent (e.g., "CFO Agent")
+3. Click **Run Agent**
+4. Select task (e.g., "Generate Daily Summary")
+5. Click **Execute**
+6. Monitor progress (usually < 30 seconds)
+7. View results
+
+### Configuring an Agent
+
+1. Click **Agents** → Select agent
+2. Click **Settings**
+3. Configure options:
+   - **Auto-Approve Threshold**: Transactions under this amount execute automatically
+   - **Notification Level**: How often to alert you (Critical, High, All)
+   - **Enabled**: Toggle agent on/off
+4. Click **Save**
+
+### Example: CFO Agent Settings
+
+**Current Configuration:**
+- Auto-approve threshold: $1000 (invoices under $1K execute immediately)
+- Notification: Critical (only notify if errors)
+- Status: Enabled ✓
+
+**If you want to approve all transactions:**
+- Set Auto-approve threshold: $0 (zero = require approval for everything)
+- Notification: All (see every action)
+
+---
+
+## 4. FINANCIAL DATA
+
+### Invoices
+
+**View invoices:**
+1. Click **Financial** → **Invoices**
+2. Filter by date range, status (Paid/Pending/Failed)
+3. Click invoice to see details
+
+**Invoice Details Include:**
+- Invoice number
+- Amount (with tax/GST if applicable)
+- Status (✓ Paid, ⏳ Pending, ✗ Failed)
+- Customer email
+- Due date
+- PDF download link
+
+**Export invoices:**
+1. Click **Export** (top right)
+2. Choose format: CSV or JSON
+3. Choose date range
+4. Click **Download**
+5. File downloads (encrypted)
+
+### Financial Summary
+
+View your business finances at a glance:
+
+**P&L Statement** (Profit & Loss)
+- Revenue (total income)
+- Expenses (total costs)
+- Net profit (revenue - expenses)
+- Profit margin %
+
+**Metrics**
+- Daily Recurring Revenue (DRR)
+- Monthly Recurring Revenue (MRR)
+- Churn rate
+- Customer Acquisition Cost (CAC)
+- Lifetime Value (LTV)
+- Runway (months of cash remaining)
+
+**Forecast**
+- 3 revenue scenarios:
+  - Conservative (assume 20% decline)
+  - Realistic (based on trends)
+  - Optimistic (assume 20% growth)
+- Based on historical data
+
+### Expenses
+
+**Log an expense:**
+1. Click **Financial** → **Expenses**
+2. Click **Add Expense**
+3. Enter details:
+   - Description (e.g., "AWS monthly hosting")
+   - Amount
+   - Category (Software, Marketing, Operations, etc)
+   - Vendor (optional)
+   - Recurring (if monthly/annual)
+4. Click **Save**
+
+**CFO Agent tracks expenses automatically:**
+- Extracts from email receipts
+- Categorizes based on description
+- Adds to P&L
+
+---
+
+## 5. TEAM MANAGEMENT
+
+### Invite Team Member
+
+1. Click **Team** → **Invite Member**
+2. Enter email address
+3. Select role:
+   - **Owner**: Full access (default)
+   - **Finance Manager**: Can approve transactions, view financials
+   - **Team Member**: Can view dashboard, execute agents
+   - **Viewer**: Read-only access
+4. Click **Send Invite**
+5. Team member receives email with join link
+6. They set password and MFA
+
+### Manage Permissions
+
+**Each role has different permissions:**
+
+| Action | Owner | Finance Manager | Team Member | Viewer |
+|--------|-------|-----------------|-------------|--------|
+| Approve transactions | ✓ | ✓ (up to limit) | ✓ | ✗ |
+| View financial data | ✓ | ✓ | ✗ | ✗ |
+| Delete data | ✓ | ✗ | ✗ | ✗ |
+| Manage team | ✓ | ✗ | ✗ | ✗ |
+| View audit logs | ✓ | ✓ | ✗ | ✗ |
+
+### Remove Team Member
+
+1. Click **Team** → Select member
+2. Click **Remove** (red button)
+3. Confirm removal
+4. Their access revoked immediately
+
+---
+
+## 6. SETTINGS & SECURITY
+
+### Account Settings
+
+**Profile**
+1. Click **Settings** → **Profile**
+2. Update:
+   - Display name
+   - Company name
+   - Timezone
+   - Language
+3. Click **Save**
+
+**Email Address**
+1. Click **Settings** → **Account**
+2. Click **Change Email**
+3. Enter new email + verify (link sent)
+4. Old email still works for 24 hours
+
+### Password & Security
+
+**Change Password**
+1. Click **Settings** → **Security**
+2. Click **Change Password**
+3. Enter current password
+4. Enter new password (must be strong: 16+ chars, mixed case, numbers, symbols)
+5. Confirm password
+6. Click **Save**
+
+**Sessions**
+1. Click **Settings** → **Security** → **Active Sessions**
+2. View all active logins (IP address, device, last activity)
+3. Click **Log Out** next to any session to sign out remotely
+
+**API Keys**
+1. Click **Settings** → **API Keys**
+2. Click **Create Key**
+3. Enter name (e.g., "Zapier Integration")
+4. Choose scopes (permissions):
+   - ✓ agent:execute
+   - ✓ metrics:read
+   - ✗ Leave others unchecked
+5. Copy key (shown once only!)
+6. Store in password manager
+
+**Rotate API Key**
+1. Click **Settings** → **API Keys** → Select key
+2. Click **Rotate**
+3. Old key immediately invalidated
+4. New key generated
+5. Update integrations (Zapier, Make.com, etc)
+
+### Privacy & Compliance
+
+**Data Export** (DPDP Act Right to Access)
+1. Click **Settings** → **Privacy**
+2. Click **Request Data Export**
+3. Choose format (JSON or CSV)
+4. Choose data included (all invoices, all audit logs, etc)
+5. Export prepared (you get email with download link)
+6. Download link expires after 24 hours
+
+**Delete Account** (DPDP Act Right to Erasure)
+1. Click **Settings** → **Privacy**
+2. Scroll to bottom: **Danger Zone**
+3. Click **Delete Account** (red button)
+4. Verify by entering your password
+5. Confirm "I understand this is irreversible"
+6. Account deleted (all data removed within 30 days)
+
+---
+
+## 7. TROUBLESHOOTING & FAQ
+
+### "My agent failed to execute"
+
+**What happened:**
+- Agent timed out (>30 seconds)
+- External API (Stripe, Gmail) was unavailable
+- Missing configuration
+- Insufficient permissions
+
+**How to fix:**
+1. Click **Audit Logs** (see what error occurred)
+2. If external API: Try again (usually temporary)
+3. If configuration: Check **Agent Settings**
+4. If permission: Ensure you have "agent:execute" permission
+5. Contact support if persists
+
+### "I forgot my password"
+
+1. Click **Login** → **Forgot Password?**
+2. Enter email address
+3. Email sent with password reset link
+4. Click link (valid for 15 minutes)
+5. Enter new password
+6. You're logged in
+
+### "I lost access to my authenticator app (MFA)"
+
+1. Use backup codes (you saved these when setting up MFA)
+2. During login, choose "Use backup code" option
+3. Enter one backup code (single-use)
+4. You're logged in
+5. Go to Settings → Security and re-setup MFA
+6. Regenerate backup codes
+
+### "How much does this cost?"
+
+**Pricing by tier:**
+- **Free**: Up to 5 agents, 100 tasks/month ($0)
+- **Growth**: Unlimited agents, 10K tasks/month ($99/month)
+- **Business**: Unlimited everything, custom agents, 24/7 support ($499/month)
+
+**What's included:**
+- Cloud hosting (24/7 uptime)
+- Automatic backups (7-year retention)
+- Email support (Growth+Business tiers)
+- API access
+- Audit logs
+
+**View billing:**
+1. Click **Settings** → **Billing**
+2. See current plan and usage
+3. Click **Upgrade Plan** to change tiers
+4. Receipt automatically emailed (tax invoice available)
+
+### "Can I export my data?"
+
+**Yes!** Three options:
+
+1. **Invoices export** (CSV/JSON)
+   - Click Financial → Invoices → Export
+   - Choose date range
+   - Download file
+
+2. **Full data export** (DPDP compliance)
+   - Click Settings → Privacy → Request Data Export
+   - All invoices, agents, team, audit logs
+   - Download encrypted file (24h expiry)
+
+3. **API access**
+   - Generate API key
+   - Use REST API to fetch data programmatically
+   - All data available via endpoints
+
+### "How do I integrate with Zapier?"
+
+1. Get API key: Settings → API Keys → Create Key
+2. Go to Zapier.com
+3. Create new Zap
+4. Search for "AIBOS" (our app)
+5. Choose action (Execute Agent, Create Invoice, etc)
+6. Paste API key when prompted
+7. Configure what to do
+8. Test & enable
+
+**Example:** "When Stripe payment received, auto-create invoice in AIBOS"
+
+### "Who can see my data?"
+
+**Access control:**
+- Only you (account owner) can see all data
+- Team members see only what their role allows
+- Support team cannot see your data (unless you contact us)
+- We never sell or share data
+- All data encrypted (at rest + in transit)
+
+**Audit trail:**
+- Every access logged (who, when, what)
+- View in Audit Logs section
+- Immutable (cannot be deleted, proving accountability)
+
+---
+
+## Support
+
+**Need help?**
+- Email: support@saivio-ai.com
+- Chat: In-app chat (bottom right)
+- Documentation: https://docs.saivio-ai.com
+- Status page: https://status.saivio-ai.com
+
+**Response times:**
+- Critical issues: < 1 hour
+- High priority: < 4 hours
+- Standard: < 24 hours
+
+---
+
+## Last Updated
+January 15, 2024
+
+## Version
+1.0.0

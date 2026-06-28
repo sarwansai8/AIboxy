@@ -1,0 +1,110 @@
+1. EXECUTIVE SUMMARY
+The Honeypot Security System is an automated threat intelligence platform that deploys decoy services (SSH, FTP, Telnet, HTTP) to attract and analyze attacker behavior in real-time. The system is designed with complete isolation from production infrastructure, real-time alerting, and automatic incident response.
+Primary Use Case: Detect advanced persistent threats (APTs), zero-day exploits, and attacker TTPs (Tactics, Techniques, Procedures)
+
+Deployment Model: Multi-tenant (each organization has isolated honeypot fleet)
+
+Target Users: Fortune 500 security teams, government agencies, security-first SaaS companies
+
+
+2. THREAT MODEL & SECURITY REQUIREMENTS:
+
+THREAT_MODEL:
+
+  Attacker_Goal: Compromise production infrastructure to steal data
+  
+  Honeypot_Goals: 
+    - Detect attacker presence early (before production compromise)
+    - Capture attacker techniques (for threat intel)
+    - Contain attacker (prevent lateral movement)
+    - Alert SOC team immediately
+
+  Attack_Scenarios_Mitigated:
+    
+    Scenario_1: SSH_brute_force
+      Attacker: Runs automated SSH scanner (e.g., Hydra)
+      Attack: Tries 10,000 username/password combinations
+      Honeypot_response:
+        - Accept connection to fake SSH server
+        - Trap attacker in restricted shell (chroot)
+        - Log every keystroke
+        - Extract attacker IP + tools used
+        - Alert SOC (MEDIUM severity)
+      Containment: Kill container after 30 mins (cleanup)
+    
+    Scenario_2: Exploitation_of_vulnerable_service
+      Attacker: Sends exploit payload (e.g., RCE in FTP)
+      Attack: Executes arbitrary commands
+      Honeypot_response:
+        - Catch exploit attempt (AppArmor/SELinux intercepts syscalls)
+        - Log exploit details
+        - Prevent execution (container sandboxing)
+        - Alert SOC (CRITICAL severity)
+      Containment: Isolate pod, preserve for forensics
+    
+    Scenario_3: Lateral_movement_attempt
+      Attacker: Tries to pivot from honeypot to production
+      Attack: Scans internal network, tries to connect to other servers
+      Honeypot_response:
+        - Network policies prevent any outbound traffic
+        - Attacker cannot reach other systems
+        - Log attempted lateral movement
+        - Alert SOC + disable all network interfaces
+      Containment: Pod has no network access beyond Kafka sink
+
+  Attack_Scenarios_NOT_Covered:
+    - Kubernetes control plane compromise (requires separate controls)
+    - AWS IAM credential theft (requires separate controls)
+    - Supply chain compromise (deploy signed images only)
+
+SECURITY_CONTROLS:
+
+  Network_isolation:
+    - Honeypot VPC: Completely separate from production VPC
+    - Network policies: No outbound traffic (except Kafka sink)
+    - Security groups: No communication between honeypots
+    - VPN/Jump box: Required to access honeypot logs (no direct internet access)
+
+  Container_isolation:
+    - Root filesystem: Read-only (attacker cannot modify binaries)
+    - AppArmor profiles: Restrict system calls (no fork, exec, write to critical files)
+    - Resource limits: Max 512 MB RAM, 1 vCPU (prevent DOS)
+    - No privileged containers: CAP_DROP=ALL
+
+  Encryption:
+    - TLS 1.3: Honeypot ↔ backend (mTLS, certificate pinning)
+    - AES-256-GCM: Logs at rest (S3 + RDS)
+    - HSM: Master keys stored in Hardware Security Module
+
+  Access_control:
+    - RBAC: Only security team can view logs
+    - MFA: Required for sensitive operations (export logs, kill honeypot)
+    - Audit: Every log access is logged (immutable)
+    - Least privilege: API keys scoped to minimum required permissions
+
+DEFENSE_DEPTH:
+
+  Layer_1_Prevention:
+    - Patch management: Keep honeypots updated (weekly)
+    - Configuration hardening: Remove default passwords, disable unnecessary services
+    - File integrity monitoring: Detect if honeypot is modified
+  
+  Layer_2_Detection:
+    - Intrusion detection system (IDS): Monitor for attack patterns
+    - Anomaly detection: Isolation forests detect unusual traffic
+    - Real-time alerting: PagerDuty/Slack notification < 1 minute
+  
+  Layer_3_Containment:
+    - Network isolation: Attacker cannot pivot
+    - Container killswitch: Auto-terminate if compromised
+    - Evidence preservation: Logs captured before cleanup
+  
+  Layer_4_Response:
+    - Automated incident ticket: Jira ticket auto-created
+    - SOC escalation: High-priority alerts to on-call engineer
+    - Forensics: Logs stored in immutable S3 for analysis
+  
+  Layer_5_Recovery:
+    - Kubernetes auto-healing: Pod killed, new one spawned
+    - No persistence: Attacker gains nothing (container is ephemeral)
+    - Lessons learned: Post-incident review of attack technique

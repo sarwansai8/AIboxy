@@ -1,0 +1,263 @@
+CI_CD_PIPELINE_ARCHITECTURE:
+
+  GITHUB_ACTIONS_WORKFLOW:
+    Trigger: On push to main branch OR pull request
+    Stages: Lint → Test → Build → Security Scan → Deploy
+    
+    stage_lint:
+      Name: Lint Code
+      Tools:
+        - ESLint (TypeScript/JavaScript)
+        - Prettier (code formatting)
+        - yamllint (Kubernetes manifests)
+      Failure: Block PR merge if linting fails
+      Time: 2 minutes
+    
+    stage_test:
+      Name: Unit & Integration Tests
+      Tools:
+        - Jest (unit tests)
+        - Supertest (HTTP testing)
+        - Docker Compose (test database)
+      Coverage: Minimum 80% code coverage required
+      Database: Spin up test Postgres + Redis containers
+      Failure: Block deployment if tests fail
+      Time: 10 minutes
+    
+    stage_build:
+      Name: Build Docker Image
+      Actions:
+        1. Build Dockerfile (multi-stage, minimize layer size)
+        2. Tag image: ecr.amazonaws.com/aibos/api-server:${GIT_COMMIT_SHA}
+        3. Tag as :latest (rolling tag)
+        4. Push to AWS ECR
+      Image_size: < 200 MB (Alpine base + optimized layers)
+      Time: 3 minutes
+    
+    stage_security_scan:
+      Name: Security Scanning
+      Tools:
+        - Snyk (dependency vulnerabilities)
+        - OWASP Dependency-Check
+        - SonarQube (code quality + security)
+        - Trivy (container image scanning for CVEs)
+      Failure: Block if CRITICAL vulnerability found
+      Warning: Alert if HIGH vulnerability
+      Time: 5 minutes
+    
+    stage_deploy_staging:
+      Name: Deploy to Staging
+      Actions:
+        1. Update Kubernetes manifests with new image
+        2. Apply to staging namespace (kubectl apply -f)
+        3. Roll out deployment (max 2 pods at a time)
+        4. Run smoke tests (basic health checks)
+        5. Run OWASP ZAP (security scanning)
+      Rollback: Automatic if smoke tests fail
+      Time: 10 minutes
+    
+    stage_deploy_production:
+      Name: Deploy to Production (Manual Approval Required)
+      Approval: Require 2 team lead sign-offs
+      Actions:
+        1. Canary release: 10% of traffic → new version
+        2. Monitor metrics for 5 minutes (error rate, latency)
+        3. If no degradation: Roll out remaining 90%
+        4. If degradation detected: Automatic rollback
+      Rollback: If error rate > 1% OR latency p95 > 300ms
+      Timeout: If any pod fails 3 times in 30 minutes
+      Time: 20 minutes
+  
+  DEPLOYMENT_STRATEGY:
+
+    Canary_release:
+      Definition: Gradually roll out to percentage of users
+      Implementation:
+        Week 1: 10% of traffic
+        Week 2: 50% of traffic
+        Week 3: 100% of traffic
+      Metrics_monitored:
+        - Error rate (must stay < 0.1%)
+        - Latency p95 (must stay < 200ms)
+        - Customer complaints (0 tolerance)
+      Rollback_trigger: Any of above violated
+    
+    Blue_green_deployment:
+      Setup: Two identical production environments (blue + green)
+      Process:
+        1. Deploy to green (while blue handles traffic)
+        2. Run tests on green
+        3. Switch load balancer to green (instant cutover)
+        4. Keep blue running for 1 hour (instant rollback)
+        5. After 1 hour: Tear down blue
+      Advantage: Instant rollback (no gradual rollout)
+      Disadvantage: Requires 2x infrastructure (expensive)
+    
+    Rolling_update:
+      Strategy: Replace pods one at a time
+      Configuration:
+        maxUnavailable: 1 (keep at least 4 of 5 pods running)
+        maxSurge: 1 (can temporarily have 6 pods for transition)
+      Timeline: ~5 minutes to replace all 5 pods
+      Advantage: No double infrastructure, zero downtime
+      Disadvantage: Slower than blue-green
+
+  ROLLBACK_PROCEDURES:
+
+    Automatic_rollback:
+      Triggers:
+        - Deployment health check fails 3 times
+        - Error rate exceeds 0.5%
+        - Latency p95 exceeds 500ms
+        - Any pod in CRASH_LOOP_BACKOFF state
+      Action: kubectl rollout undo deployment/api-server (automatic)
+      Notification: Slack alert + PagerDuty incident
+      Time to rollback: < 30 seconds
+    
+    Manual_rollback:
+      Command: kubectl rollout undo deployment/api-server --to-revision=N
+      Process:
+        1. Identify bad revision (kubectl rollout history)
+        2. Identify last good revision
+        3. Rollback to last good
+        4. Verify metrics normalize
+        5. Investigate root cause
+        6. Fix + re-deploy when ready
+    
+    Incident_post_mortem:
+      Trigger: Any production issue
+      Timeline:
+        - Immediate: Mitigate (rollback, turn off feature)
+        - Within 1 hour: Write incident summary (Slack)
+        - Within 24 hours: Schedule post-mortem meeting
+        - Within 48 hours: Publish post-mortem + action items
+      Questions to answer:
+        - What failed?
+        - Why did we miss it in testing?
+        - What's the fix?
+        - How do we prevent recurrence?
+
+  MONITORING_DURING_DEPLOYMENT:
+
+    Pre_deployment:
+      - Metrics baseline: p50, p95, p99 latency (last 5 minutes)
+      - Error rate: Last 5 minutes
+      - Database connections: Current count + trending
+    
+    During_deployment:
+      - Monitor metrics real-time (update every 10 seconds)
+      - Dashboard: Grafana with deployment phase visible
+      - Alerting: Slack notification every 2 minutes with metrics
+      - Threshold: If metrics degrade > 10% → auto-rollback
+    
+    Post_deployment:
+      - Monitor for 30 minutes after complete
+      - If no issues: Send "deployment successful" message
+      - If issues: Incident post-mortem (see above)
+      - Log deployment: Start time, end time, changes deployed
+
+SECURITY_SCANNING_DETAILS:
+
+  SAST (Static Application Security Testing):
+    
+    SonarQube:
+      Scans: Every commit
+      Rules: 1000+ rules for code quality + security
+      Failures: Blocker issues prevent merge
+      Examples:
+        - SQL injection patterns
+        - Missing input validation
+        - Hard-coded secrets
+        - Buffer overflows
+    
+    ESLint_security_plugin:
+      Scans: Every commit
+      Rules: 50+ security-related rules
+      Failures: Block merge if critical
+      Examples:
+        - eval() usage (RCE risk)
+        - Missing CSRF tokens
+        - Unvalidated redirects
+    
+    npm_audit:
+      Scans: Every dependency update OR weekly
+      Failures:
+        - CRITICAL: Block merge + auto-create PR with fix
+        - HIGH: Block merge + require manual review
+        - MEDIUM: Warn (but allow merge)
+        - LOW: Log (allow merge)
+      Auto-fix: GitHub Dependabot auto-creates PRs for fixes
+
+  DAST (Dynamic Application Security Testing):
+    
+    OWASP_ZAP:
+      Scans: Staging environment after each deploy
+      Time: ~30 minutes for full scan
+      Scope: All endpoints (API, webhooks)
+      Failures:
+        - CRITICAL: Block production deploy
+        - HIGH: Require security team review
+        - MEDIUM/LOW: Log + monitor
+      Examples: Detected vulnerabilities
+        - SQL injection (input not escaped)
+        - XSS (output not encoded)
+        - Insecure deserialization
+        - XML External Entity (XXE)
+    
+    Burp_Suite_Pro:
+      Scans: Monthly (manual penetration testing)
+      Scope: Full application + API
+      Time: 3-5 days for thorough assessment
+      Report: Detailed findings + remediation steps
+      Cost: ~$3K/month (subscription)
+
+  DEPENDENCY_SCANNING:
+    
+    Snyk:
+      Scans: Real-time (on commit + daily check)
+      Database: 1M+ known vulnerabilities
+      Features:
+        - Auto-create PRs with upgrades
+        - Policy: Allow/block specific packages
+        - Remediation: Suggested fixes
+      SLA: Critical → fix within 7 days (or service disabled)
+    
+    GitHub_Dependabot:
+      Scans: Daily check for new updates
+      Features:
+        - Auto-create PR for upgrades
+        - Test: Run CI on PR before merging
+        - Security updates: Prioritize security patches
+        - Group updates: Combine related updates in 1 PR
+    
+    Frequency_of_scans:
+      - On every commit: Linting, unit tests
+      - On merge to main: Container build, SAST
+      - After deploy to staging: DAST (OWASP ZAP)
+      - Weekly: Full dependency scan (Snyk)
+      - Monthly: Penetration testing (Burp Suite)
+      - Quarterly: Infrastructure security audit
+      - Yearly: Third-party security assessment
+
+ARTIFACT_MANAGEMENT:
+
+  Docker_registry:
+    Registry: AWS ECR (Elastic Container Registry)
+    Image_naming: ecr.amazonaws.com/aibos/api-server:v1.2.3
+    Versioning: Semantic versioning (major.minor.patch)
+    Tag_immutability: Enabled (cannot overwrite v1.2.3)
+    Image_scanning: Trivy scans on push (before availability)
+    
+    Image_lifecycle:
+      - Pushed: Scanned immediately
+      - Wait: Scan must complete (< 5 mins)
+      - Available: Image ready for deployment
+      - Retention: Keep for 90 days (automatic cleanup)
+      - Archive: Move to S3 Glacier after 90 days (compliance)
+  
+  Kubernetes_manifests:
+    Storage: Git repository (src/k8s/)
+    Version_control: Every change has commit + review
+    Deployments: Tied to image tags (e.g., api-server:v1.2.3)
+    Secrets: Stored in AWS Secrets Manager (not in Git)
+    Config: Stored in Kubernetes ConfigMaps (in Git, non-sensitive)

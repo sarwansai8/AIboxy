@@ -1,0 +1,187 @@
+POSTGRESQL_CONFIGURATION:
+
+  TRANSACTION_ISOLATION_LEVELS:
+    
+    SERIALIZABLE_TRANSACTIONS (Highest Safety):
+      Use case: Financial transactions (payments, invoices)
+      Behavior: "Serializable" isolation - acts as if all transactions execute serially
+      Serialization failures: Automatic retry (app must handle)
+      Performance: Slower (but safety > speed for money)
+      Implementation:
+        BEGIN ISOLATION LEVEL SERIALIZABLE;
+        UPDATE invoices SET amount = amount - 500
+          WHERE customer_id = ? AND status = 'pending';
+        COMMIT;  // If conflict: "SQLSTATE 40001 serialization_failure"
+    
+    REPEATABLE_READ (Default for Agent Operations):
+      Use case: Agent database queries
+      Behavior: Snapshot isolation - reads don't see uncommitted changes
+      Performance: Faster than SERIALIZABLE
+      Safe from: Dirty reads, non-repeatable reads
+      Vulnerable to: Phantom reads (but rare in practice)
+      Implementation:
+        BEGIN ISOLATION LEVEL REPEATABLE READ;
+        SELECT * FROM customers WHERE id = ?;
+        // Later in transaction
+        SELECT * FROM invoices WHERE customer_id = ?;
+        COMMIT;  // Consistent snapshot throughout transaction
+    
+    READ_COMMITTED (Fast, Read-Only):
+      Use case: Dashboard queries, metrics aggregation
+      Behavior: Only sees committed data
+      Performance: Fastest
+      Trade-off: May see inconsistent snapshots across multiple queries
+      Acceptable: For non-critical reads (metrics, analytics)
+      Implementation:
+        BEGIN ISOLATION LEVEL READ COMMITTED;
+        SELECT * FROM metrics WHERE created_at > now() - '7 days'::interval;
+        COMMIT;
+
+  DEADLOCK_PREVENTION:
+
+    Lock_ordering:
+      // Always lock in same order to prevent deadlock
+      // Order: customers → team_members → invoices → audit_logs
+      
+      CORRECT:
+        BEGIN;
+        SELECT * FROM customers WHERE id = ? FOR UPDATE;
+        SELECT * FROM invoices WHERE customer_id = ? FOR UPDATE;
+        // ... operation ...
+        COMMIT;
+      
+      WRONG (can deadlock):
+        BEGIN;
+        SELECT * FROM invoices WHERE customer_id = ? FOR UPDATE;
+        SELECT * FROM customers WHERE id = ? FOR UPDATE;
+        COMMIT;
+
+    Timeout_configuration:
+      statement_timeout: 30000  // 30 seconds per query
+      lock_timeout: 10000       // 10 seconds to acquire lock
+      idle_in_transaction_session_timeout: 60000  // Kill idle transactions after 1 min
+      
+      // If timeout: Application receives SQLSTATE 57014 (query_canceled)
+      // Application must handle gracefully (rollback + retry)
+
+  CONNECTION_POOLING_MATH:
+
+    Calculation:
+      concurrent_users = 5000  // Month 6 estimate
+      queries_per_user_request = 3  // Dashboard → metrics + invoices + team
+      active_session_percentage = 0.2  // Only 20% of users are active simultaneously
+      
+      required_connections = concurrent_users * active_session_percentage * queries_per_user_request
+      required_connections = 5000 * 0.2 * 3 = 3000
+      
+      pgBouncer_pool_size = 500 (but what?)  // Needs increase!
+      
+      CORRECT_CALCULATION:
+      - Run load test with actual traffic patterns
+      - Monitor connection pool utilization
+      - Set pool_size = p95_concurrent_connections + 20% buffer
+      - Month 1: 100 connections (OK)
+      - Month 3: 300 connections (increase to 400)
+      - Month 6: 800 connections (increase to 1000)
+
+  REPLICATION_STRATEGY:
+
+    Master_replica_replication:
+      Master: Primary write database (us-east-1a)
+      Replica_1: Hot standby for failover (us-east-1b, same region, different AZ)
+      Replica_2: Analytics reads (us-east-1c, same region)
+      Replica_3: Backups + PITR (different region, us-west-2)
+    
+    Read_distribution:
+      Writes: Always master
+      Dashboard reads: Replica_1 (prioritize freshness)
+      Audit logs: Replica_2 (can lag 5 minutes, acceptable)
+      Metrics aggregation: Replica_2 (eventual consistency OK)
+    
+    Failover_procedure:
+      Detection: 3 failed connection attempts × 1 second = 3 seconds
+      Failover: Promote Replica_1 → Master (1 minute)
+      DNS update: Change CNAME to point to new master (30 seconds)
+      Notify app: Refresh connection string (automatic)
+      Total RTO: ~90 seconds (beats 15 min target!)
+
+  ENCRYPTION_AT_REST_DETAILS:
+
+    RDS_encryption:
+      Enabled: Yes (AES-256-GCM)
+      Key: AWS KMS (customer-managed key)
+      Key rotation: Automatic yearly
+      Snapshots: Also encrypted with same key
+      Cross-region replicas: Encrypted with replica region's key
+    
+    Application_layer_encryption:
+      // For HIGHLY sensitive fields (PII, financial summaries)
+      
+      before_insert_into_database:
+        plaintext = customer_email
+        encryption_key = KMS.decrypt(master_key_id)
+        derived_key = HKDF(encryption_key, salt=customer_id, info="email_encryption")
+        
+        nonce = random(12)  // 96-bit random nonce
+        ciphertext, tag = AES256GCM.encrypt(
+          plaintext=plaintext,
+          key=derived_key,
+          nonce=nonce,
+          aad=customer_id + "email"  // Additional authenticated data
+        )
+        
+        encrypted_value = base64(nonce || ciphertext || tag)
+        INSERT INTO customers (id, email_encrypted) VALUES (?, encrypted_value)
+      
+      after_retrieve_from_database:
+        encrypted_value = row.email_encrypted
+        nonce_ciphertext_tag = base64_decode(encrypted_value)
+        
+        nonce = nonce_ciphertext_tag[0:12]
+        ciphertext = nonce_ciphertext_tag[12:-16]
+        tag = nonce_ciphertext_tag[-16:]
+        
+        derived_key = HKDF(encryption_key, salt=customer_id, info="email_encryption")
+        plaintext, valid = AES256GCM.decrypt(
+          ciphertext=ciphertext,
+          key=derived_key,
+          nonce=nonce,
+          aad=customer_id + "email",
+          tag=tag
+        )
+        
+        if not valid:
+          throw TamperingDetectedError()
+        
+        return plaintext  // Customer email (decrypted)
+
+BACKUP_STRATEGY:
+
+  Automated_snapshots:
+    Frequency: Daily at 2 AM UTC
+    Retention: 35 days (AWS default)
+    Encryption: Same KMS key
+    Incremental: Only changed blocks (cost-effective)
+  
+  Point_in_time_recovery:
+    Enabled: Yes
+    Retention: 7 days
+    Restored to: New RDS instance (non-prod)
+    Use case: "What was the data value on 2024-01-15 at 3:45 PM?"
+  
+  Cross_region_backup:
+    Location: us-west-2 (different AWS region)
+    Frequency: Daily
+    Purpose: Disaster recovery (if entire us-east-1 region fails)
+    Time to restore: 30 minutes (including DNS propagation)
+  
+  Backup_testing:
+    Schedule: Monthly restore test to non-prod
+    Process:
+      1. Select random backup
+      2. Restore to test database
+      3. Verify data integrity (checksums match)
+      4. Run smoke tests (API endpoints work)
+      5. Document results
+      6. Delete test database
+    Purpose: Ensure backups are actually usable

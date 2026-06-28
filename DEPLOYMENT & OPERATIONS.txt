@@ -1,0 +1,895 @@
+2.1 DEPLOYMENT GUIDE: AI Business Operating System:
+
+PRE_DEPLOYMENT_CHECKLIST:
+
+  1_CODE_QUALITY:
+    ☐ All unit tests passing (npm test)
+    ☐ Code coverage >= 85%
+    ☐ ESLint passing (no warnings)
+    ☐ TypeScript compilation successful (no errors)
+    ☐ Security scanning passed (Snyk, SonarQube)
+    ☐ Peer review completed (at least 1 approval)
+    ☐ Commit message follows convention (conventional commits)
+  
+  2_DATABASE:
+    ☐ Migration scripts reviewed
+    ☐ Rollback scripts tested (can revert if needed)
+    ☐ Backup created before migration
+    ☐ Migration tested on staging database (successful)
+    ☐ Data integrity verified post-migration
+    ☐ Foreign keys intact, no orphaned records
+    ☐ Indexes created (performance verified)
+  
+  3_INFRASTRUCTURE:
+    ☐ Kubernetes manifests validated (kubeval)
+    ☐ Resource requests/limits set appropriately
+    ☐ Pod security policies enforced
+    ☐ Network policies in place
+    ☐ Storage volumes configured
+    ☐ TLS certificates valid (not expired, correct domain)
+    ☐ Monitoring dashboards created/updated
+    ☐ Alerting rules configured
+  
+  4_SECRETS_&_CONFIGURATION:
+    ☐ API keys rotated (< 90 days old)
+    ☐ Database passwords changed
+    ☐ Encryption keys accessible (HSM functional)
+    ☐ Environment variables set correctly
+    ☐ Slack webhook configured (for alerts)
+    ☐ PagerDuty integration configured
+    ☐ Email notifications configured
+  
+  5_SECURITY:
+    ☐ Security audit completed (no critical findings)
+    ☐ Penetration testing passed
+    ☐ OWASP Top 10 checklist completed
+    ☐ SIEM integration tested
+    ☐ Log aggregation working
+    ☐ API rate limiting configured
+    ☐ WAF rules updated
+  
+  6_DOCUMENTATION:
+    ☐ Release notes written
+    ☐ Deployment runbook reviewed
+    ☐ Rollback procedure documented
+    ☐ Known issues documented
+    ☐ Support team briefed
+    ☐ Incident response plan reviewed
+  
+  7_STAKEHOLDER_APPROVAL:
+    ☐ Engineering lead approval
+    ☐ DevOps lead approval
+    ☐ Security team approval
+    ☐ Product manager sign-off
+    ☐ No open critical bugs in JIRA
+
+DEPLOYMENT_PROCEDURE:
+
+  Step_1: Pre_deployment_validation (15 minutes)
+    
+    1.1 Docker image verification
+        $ docker inspect ecr.amazonaws.com/aibos/api-server:v1.2.3
+        Verify:
+        - Image exists in ECR
+        - Image scanned (no critical CVEs)
+        - Image signed (content trust)
+    
+    1.2 Kubernetes manifest validation
+        $ kubeval k8s/deployment-api-server.yaml
+        Verify: All manifests valid YAML, no schema errors
+    
+    1.3 Database backup
+        $ aws rds create-db-snapshot \
+          --db-instance-identifier aibos-prod \
+          --db-snapshot-identifier aibos-prod-snapshot-$(date +%s)
+        Verify: Snapshot creation initiated
+    
+    1.4 Staging deployment test
+        $ kubectl apply -f k8s/deployment-api-server.yaml \
+          --namespace=aibos-staging \
+          --dry-run=client -o yaml
+        Verify: No validation errors
+  
+  Step_2: Staging_deployment (10 minutes)
+    
+    2.1 Deploy to staging
+        $ kubectl apply -f k8s/deployment-api-server.yaml \
+          --namespace=aibos-staging
+        Verify: Deployment accepted
+    
+    2.2 Monitor rollout
+        $ kubectl rollout status deployment/api-server \
+          --namespace=aibos-staging \
+          --timeout=5m
+        Verify: All pods running (5 replicas)
+    
+    2.3 Run smoke tests
+        $ npm run test:smoke:staging
+        Tests:
+          - /health endpoint returns 200
+          - /api/v1/auth/login works (test credentials)
+          - Database connectivity (SELECT 1)
+          - Redis connectivity (PING)
+          - External API connectivity (Stripe test API)
+        Verify: All tests pass
+    
+    2.4 Run security tests
+        $ owasp-zap-scan staging.saivio-ai.com
+        Verify: No new security issues
+  
+  Step_3: Production_canary_deployment (5 minutes per phase)
+    
+    3.1 Deploy to 10% of traffic
+        $ kubectl set image deployment/api-server \
+          api-server=ecr.amazonaws.com/aibos/api-server:v1.2.3 \
+          --namespace=aibos-prod \
+          --record
+        
+        // Manually configure traffic split (10% to canary)
+        $ kubectl apply -f k8s/istio-virtual-service-canary-10.yaml
+        Verify: VirtualService updated
+    
+    3.2 Monitor canary metrics (5 minutes)
+        Dashboard: Grafana "Canary Deployment" board
+        Metrics_monitored:
+          - Error rate (must stay < 0.1%)
+          - Latency p95 (must stay < 200ms)
+          - Pod CPU usage
+          - Pod memory usage
+        
+        If metrics OK: Proceed to step 3.3
+        If metrics bad: Execute rollback (see step 4)
+    
+    3.3 Increase traffic to 50% (5 minutes)
+        $ kubectl apply -f k8s/istio-virtual-service-canary-50.yaml
+        Monitor_same_metrics
+    
+    3.4 Increase traffic to 100% (5 minutes)
+        $ kubectl apply -f k8s/istio-virtual-service-canary-100.yaml
+        Monitor_same_metrics
+    
+    3.5 Cleanup canary configuration
+        $ kubectl delete virtualservice api-server-canary \
+          --namespace=aibos-prod
+        Verify: Canary removed, all traffic on new version
+
+  Step_4: Post_deployment_validation (10 minutes)
+    
+    4.1 Verify all pods healthy
+        $ kubectl get pods -n aibos-prod -o wide
+        Verify:
+          - 5 api-server pods running
+          - 0 pods in CrashLoopBackoff
+          - All have correct image (v1.2.3)
+    
+    4.2 Verify metrics normalized
+        Check Grafana:
+          - Error rate < 0.1%
+          - Latency p95 < 200ms
+          - No alerts firing (unless expected)
+    
+    4.3 Verify customer functionality
+        - Sample customer can login
+        - Dashboard loads (< 200ms)
+        - Agent executes successfully
+        - Email notifications sent
+    
+    4.4 Verify audit logs
+        Query:
+          SELECT COUNT(*) FROM audit_logs
+          WHERE created_at > now() - '10 minutes'::interval
+        Verify: Recent deployments logged (transparency)
+    
+    4.5 Notify stakeholders
+        Send message to #engineering:
+          "✅ Deployment v1.2.3 successful
+          Time: 20 minutes
+          Metrics: Error rate 0.02%, Latency p95 145ms
+          Zero customer impact"
+
+ROLLBACK_PROCEDURE:
+
+  Automatic_rollback (triggered by system):
+    
+    Condition: Any of:
+      - Error rate > 0.5% for 2 consecutive minutes
+      - Latency p95 > 500ms for 2 consecutive minutes
+      - Any pod in CrashLoopBackoff state
+      - Health check failing for 3 consecutive attempts
+    
+    Action:
+      $ kubectl rollout undo deployment/api-server -n aibos-prod
+      // This reverts to previous revision
+    
+    Notification:
+      - Slack alert: "⚠️ ROLLBACK: v1.2.3 → v1.2.2 (error rate spike)"
+      - PagerDuty incident: P2 (high priority)
+      - Customer status page: "Deployment issue, reverting"
+    
+    Time_to_rollback: < 30 seconds
+
+  Manual_rollback (initiated by engineer):
+    
+    Reason: Issue detected that didn't trigger automatic rollback
+    
+    Steps:
+      1. Identify bad revision
+         $ kubectl rollout history deployment/api-server -n aibos-prod
+         Output:
+           REVISION  CHANGE-CAUSE
+           3         kubectl set image deployment/api-server (v1.2.3)
+           2         kubectl set image deployment/api-server (v1.2.2)
+      
+      2. Rollback to revision 2
+         $ kubectl rollout undo deployment/api-server \
+           --to-revision=2 -n aibos-prod
+      
+      3. Verify
+         $ kubectl rollout status deployment/api-server \
+           --namespace=aibos-prod --timeout=5m
+      
+      4. Monitor metrics (same as post-deployment)
+      
+      5. Notify team
+         Message to #engineering:
+           "⚠️ Manual rollback: v1.2.3 → v1.2.2
+           Reason: [details]
+           Metrics normalizing..."
+      
+      6. Post-incident review (within 24 hours)
+         - Why did we miss this in staging?
+         - What's the fix?
+         - How do we prevent recurrence?
+
+DATABASE_MIGRATION_PROCEDURE:
+
+  Example: Add new column to customers table
+  
+  Pre_migration:
+    1. Create migration script (auto-generated by ORM)
+       // File: db/migrations/20240115_add_subscription_tier.ts
+       export async function up(knex) {
+         await knex.schema.table('customers', (table) => {
+           table.string('subscription_tier', 50).defaultTo('free')
+         })
+       }
+       
+       export async function down(knex) {
+         await knex.schema.table('customers', (table) => {
+           table.dropColumn('subscription_tier')
+         })
+       }
+    
+    2. Test migration on production replica
+       // Restore recent snapshot to test database
+       // Run migration: knex migrate:latest
+       // Verify: Column exists, default value applied
+       // Verify: No data loss
+       // Rollback: knex migrate:rollback
+       // Verify: Column dropped
+    
+    3. Create rollback runbook (in case we need to revert)
+       $ knex migrate:rollback --env production
+
+  During_migration:
+    1. Create backup (already done in step 1)
+    
+    2. Notify customers
+       Email: "Scheduled maintenance 2:00-2:15 AM UTC. Brief unavailability expected."
+    
+    3. Enable maintenance mode (optional)
+       // Return 503 Service Unavailable for all requests
+       // Queue requests to process after migration
+    
+    4. Run migration
+       $ knex migrate:latest --env production
+       Monitor: CloudWatch logs for errors
+       Timeout: 30 minutes (should be much faster)
+    
+    5. Verify migration
+       SELECT COUNT(*) FROM customers WHERE subscription_tier IS NULL
+       // Should return 0 (default value applied)
+    
+    6. Monitor for errors (5 minutes)
+       Check application logs for migration-related errors
+       If errors: Run knex migrate:rollback && investigate
+    
+    7. Disable maintenance mode
+       // Resume normal API operation
+
+  Post_migration:
+    - Update application code to use new column
+    - Deploy new application version (with migration already applied)
+    - Verify feature works end-to-end
+    - Document migration in release notes
+    - Archive migration script (version controlled)
+
+VERSION_CONTROL_STRATEGY:
+
+  Versioning_scheme: Semantic versioning (major.minor.patch)
+    Example: v1.2.3
+    - 1 = major version (breaking changes)
+    - 2 = minor version (new features, backward compatible)
+    - 3 = patch version (bug fixes)
+  
+  Release_process:
+    1. Create release branch
+       $ git checkout -b release/v1.2.3
+    
+    2. Update version number
+       File: package.json
+       "version": "1.2.3"
+    
+    3. Update CHANGELOG
+       File: CHANGELOG.md
+       ## [1.2.3] - 2024-01-15
+       ### Added
+       - New feature X
+       ### Fixed
+       - Bug Y
+    
+    4. Create pull request
+       PR title: "Release v1.2.3"
+       - Engineering lead review
+       - DevOps lead review
+       - Approved = can merge
+    
+    5. Merge to main
+       $ git merge --no-ff release/v1.2.3
+    
+    6. Tag release
+       $ git tag -a v1.2.3 -m "Release version 1.2.3"
+       $ git push origin v1.2.3
+    
+    7. Create GitHub release
+       - Title: "v1.2.3"
+       - Description: Copy from CHANGELOG
+       - Artifacts: Release notes, migration guide (if applicable)
+    
+    8. Deploy to staging (automatic via CI/CD)
+    
+    9. Deploy to production (manual approval required)
+
+EMERGENCY_DEPLOYMENT:
+
+  Scenario: Critical security vulnerability (e.g., OWASP #1 injection)
+  
+  Process:
+    1. Create hotfix branch
+       $ git checkout -b hotfix/security-critical-injection
+    
+    2. Fix vulnerability (minimal changes)
+       - Only fix the security issue
+       - Don't refactor or add features
+       - Use existing test suite
+    
+    3. Fast-track review (15 minutes)
+       - Engineering lead: 5 min review
+       - Security lead: 5 min approval
+       - DevOps: 5 min deployment readiness
+    
+    4. Deploy immediately (skip staging)
+       - Justification: Security vulnerability requires immediate action
+       - Risk acceptance: Engineering lead + Security lead sign-off
+    
+    5. Monitor closely (30 minutes)
+       - Metrics dashboard
+       - Alert sensitivity increased
+       - On-call engineer standing by
+    
+    6. Post-incident review (within 4 hours)
+       - How did vulnerability get past review?
+       - What's the permanent fix?
+       - How do we prevent similar vulnerabilities?
+       - Improvement: Add security test case
+
+       2.2 INCIDENT RESPONSE PLAYBOOK:
+       INCIDENT_TYPE_1: API_SERVER_DOWN (ERROR RATE > 1% OR P95 LATENCY > 1 SECOND)
+
+  SEVERITY: CRITICAL (P1)
+  IMPACT: Customers cannot use system
+  RTO: < 15 minutes
+  
+  DETECTION:
+    Automatic: PagerDuty alert fires (within 1 minute)
+    Alert: "🚨 API ERROR RATE EXCEEDED: 2.5% (threshold: 1%)"
+    Additional_info:
+      - Affected endpoints: POST /api/v1/agents/*, GET /api/v1/dashboard
+      - Error type: 500 Internal Server Error
+      - Number of errors: 5,234 in last 5 minutes
+      - Affected customers: 47 out of 50
+  
+  IMMEDIATE_RESPONSE (0-5 minutes):
+    
+    1. On-call engineer receives PagerDuty alert
+       Action: Acknowledge alert (prevents escalation after 5 min)
+       Time: < 1 minute
+    
+    2. Open war room (Slack #incidents channel)
+       $ /incident create
+         title: "API Server Down - 2.5% error rate"
+         severity: P1
+         oncall: @engineer
+    
+    3. Gather context (2 minutes)
+       Questions:
+         - When did incident start? (check CloudWatch metrics)
+         - What changed recently? (check deployment history)
+         - Which customers affected? (query analytics)
+         - What's error message? (check logs)
+       
+       // Check recent deployments
+       $ kubectl rollout history deployment/api-server -n aibos-prod
+       Output:
+         REVISION  CHANGE-CAUSE                              AGE
+         5         kubectl set image deployment/api-server   2 hours (OK)
+         4         kubectl set image deployment/api-server   1 day
+       
+       // Check error logs
+       $ kubectl logs -n aibos-prod -l app=api-server --tail=100
+       Error: "ECONNREFUSED: connection refused to database"
+       
+       ROOT CAUSE IDENTIFIED: Database connection refused
+    
+    4. Attempt quick fix (3 minutes)
+       Try 1: Restart database
+         $ aws rds reboot-db-instance --db-instance-identifier aibos-prod
+         Result: Still failing (30-second reboot)
+       
+       Try 2: Check database metrics
+         AWS RDS dashboard:
+           - CPU: 95% (very high)
+           - Connections: 500/500 (EXHAUSTED)
+         Root cause: Connection pool exhausted
+       
+       Try 3: Increase connection pool
+         // Can't do this without redeploying application
+         // Instead: Terminate idle connections
+         $ PGOPTIONS='-c idle_in_transaction_session_timeout=10000' \
+           psql -c "SELECT pid FROM pg_stat_activity WHERE state='idle';"
+         Kill idle connections
+         Result: 50 connections freed
+       
+       Try 4: Rollback (if quick fix doesn't work)
+         Since recent deployment was 2 hours ago (unlikely cause)
+         But let's verify code didn't introduce connection leak
+
+  ESCALATION_RESPONSE (5-15 minutes):
+    
+    5. If quick fixes didn't work: Declare Page 2
+       Notify: Database specialist + DevOps lead
+       Time: 5 minutes into incident
+    
+    6. Investigate root cause thoroughly
+       Questions:
+         - Was there a deployment 2-3 hours ago?
+           Yes: v1.2.3 deployed at 10:00 AM
+         - Does application have connection leak?
+           Check code: Yes! Found bug in /api/v1/agents/execute
+           Code: await db.getConnection() but never release()
+         - How long until connection pool exhausted?
+           With 1000 req/min × 5 min = 5000 requests
+           Connection pool max: 500
+           Time to exhaust: 3 minutes (matches incident timeline)
+    
+    7. Hotfix deployment
+       Create hotfix:
+         $ git checkout -b hotfix/connection-leak
+         // Fix: Add finally { connection.release() }
+         $ git commit -m "Fix: Release database connection in agent executor"
+         $ git push origin hotfix/connection-leak
+       
+       Fast-track review (5 minutes):
+         - Code review: Approved (engineer verified fix)
+         - Build: Docker build + push to ECR (2 minutes)
+         - Deploy: kubectl set image ... (1 minute)
+       
+       Verify:
+         $ kubectl rollout status deployment/api-server -n aibos-prod
+         Deployment successful!
+       
+       Monitor:
+         Error rate: 2.5% → 0.8% (within 30 seconds)
+         Error rate: 0.8% → 0.1% (within 2 minutes)
+         All pods healthy
+    
+    8. Close incident (15 minutes after start)
+       Status: RESOLVED
+       Message: "🟢 API restored. Root cause: connection leak in v1.2.3. Hotfix v1.2.4 deployed."
+
+  POST_INCIDENT_REVIEW (within 24 hours):
+    
+    9. Schedule post-mortem meeting
+       Attendees: Engineer, DevOps, Tech Lead, Product
+       Duration: 45 minutes
+       
+       Agenda:
+         1. Timeline: What happened, when did we detect it, how did we fix it?
+         2. Root cause: Why did connection leak happen?
+         3. Detection: Why didn't our tests catch this?
+         4. Prevention: How do we prevent recurrence?
+         5. Action items: Who will do what by when?
+       
+       Timeline_breakdown:
+         10:00 AM: Deployment v1.2.3 (database connection leak introduced)
+         10:03 AM: First error (connection pool exhausted)
+         10:05 AM: PagerDuty alert fires
+         10:06 AM: Engineer pages in (acknowledges alert)
+         10:08 AM: Root cause identified (connection leak)
+         10:10 AM: Hotfix started
+         10:13 AM: Hotfix tested + deployed
+         10:15 AM: Incident resolved
+         Total incident time: 15 minutes
+       
+       Root_cause_analysis:
+         Why: Developer wrote code that gets connection but didn't release it
+         Why: Code review didn't catch missing finally{} block
+         Why: No connection pool exhaustion test in CI/CD
+       
+       Prevention_actions:
+         1. Add integration test: "Database connections must be released"
+            Expected_result: Test fails if connections not released
+            Owner: Engineer
+            Deadline: By tomorrow
+         
+         2. Add connection pool monitoring to alerting
+            Alert: If connection usage > 80%
+            Owner: DevOps
+            Deadline: By tomorrow
+         
+         3. Code review checklist: "Database resources released?"
+            Owner: Tech Lead
+            Deadline: Within 1 week
+         
+         4. Refactor to use connection pooling library
+            Benefit: Connection automatically released (less manual work)
+            Owner: Engineer
+            Deadline: Within 2 weeks
+       
+       Document:
+         - Incident report (PDF)
+         - Timeline (visual, minute-by-minute)
+         - Root cause analysis
+         - Action items + owners + deadlines
+         - Share with team (Slack, email)
+
+INCIDENT_TYPE_2: DATABASE_CORRUPTION (DATA INTEGRITY ISSUE)
+
+  SEVERITY: CRITICAL (P1)
+  IMPACT: Financial data may be inconsistent
+  RTO: < 1 hour
+  RPO: < 1 minute
+  
+  DETECTION:
+    Alert: Automated data integrity check finds inconsistency
+    Example:
+      SELECT SUM(amount_cents) FROM invoices = $50,000
+      SELECT SUM(amount_cents) FROM customers.balance = $49,500
+      Difference: $500 discrepancy
+  
+  IMMEDIATE_RESPONSE (0-5 minutes):
+    
+    1. Verify corruption is real (not just timing issue)
+       Wait 2 minutes (allow eventual consistency to catch up)
+       Re-run query
+       If still discrepancy: Confirmed corruption
+    
+    2. Declare incident P1
+       War room: #incidents channel
+       Notify: Database specialist + Tech Lead + CISO
+    
+    3. Stop writes to affected table (emergency measure)
+       // Temporarily disable agent that was writing to invoices
+       $ kubectl set env deployment/agent-cfo DISABLE_INVOICE_WRITES=true
+       Impact: No new invoices created (temporary)
+       Benefit: Prevents further corruption
+    
+    4. Identify corruption scope
+       Questions:
+         - How many records affected?
+         - Which customers affected?
+         - When did corruption start?
+         - What caused it? (bug, hardware failure, race condition)
+       
+       Query:
+         SELECT customer_id, COUNT(*) 
+         FROM invoices 
+         WHERE created_at > now() - interval '1 hour'
+         GROUP BY customer_id
+         // Identify affected customers
+
+  RECOVERY_RESPONSE (5-30 minutes):
+    
+    5. Assess recovery options
+       
+       Option A: Restore from backup (RPO = 1 minute)
+         Time to recover: 15 minutes
+         Data loss: < 1 minute (last few invoices)
+         Process:
+           1. Identify last good backup (created 1 minute ago)
+           2. Restore to new RDS instance
+           3. Verify data integrity
+           4. Cut over (change connection string)
+           5. Re-create missing data (invoices from last minute)
+         Decision: CHOSEN (safe, proven method)
+       
+       Option B: Fix corruption in place
+         Time to recover: unknown (risky)
+         Risk: May not be able to fully fix
+         Decision: NOT CHOSEN (too risky with financial data)
+       
+       Option C: Manual data reconciliation
+         Time to recover: 2-3 hours
+         Risk: Human error
+         Decision: NOT CHOSEN (too slow)
+    
+    6. Execute restore
+       $ aws rds restore-db-instance-from-db-snapshot \
+         --db-instance-identifier aibos-prod-restored \
+         --db-snapshot-identifier aibos-prod-snapshot-2024-01-15-10-14
+       Monitor: RDS restoration progress (15 minutes)
+       
+       Verify restored database:
+         - Connect to restored instance
+         - Run data integrity checks
+         - Verify invoices table has expected row count
+         - Verify SUM(amount_cents) matches customers.balance
+         - No corruption in restored data
+       
+       Cut over:
+         - Update connection string (environment variable)
+         - Restart API pods (new connection string takes effect)
+         - Monitor error rate (should be 0)
+    
+    7. Recover lost data (< 1 minute)
+       - Identify invoices created after last backup
+       - Use audit logs to reconstruct
+       - Re-insert invoices (idempotent operation)
+       - Notify affected customers (transparency)
+    
+    8. Close incident (30 minutes after start)
+       Status: RESOLVED
+       Message: "🟢 Database restored from backup. No data loss. Affected customers notified."
+
+  INVESTIGATION (within 24 hours):
+    
+    9. Root cause analysis
+       Questions:
+         - What caused corruption?
+         - Was it a database bug or application bug?
+         - Could it happen again?
+       
+       Investigation:
+         Check transaction logs (WAL files)
+         Check application logs (what was app doing?)
+         Check database logs (any errors?)
+         Check hardware status (any disk errors?)
+       
+       Hypothesis: Race condition in transaction isolation
+       Evidence: Two agents updated same invoice simultaneously
+       Solution: Use SERIALIZABLE isolation for financial transactions
+    
+    10. Implement prevention
+        - Add database constraints (CHECK amount > 0)
+        - Add application-level validation
+        - Add integration tests (concurrent transaction simulation)
+        - Upgrade monitoring (continuous data integrity checks)
+
+INCIDENT_TYPE_3: SECURITY_BREACH (UNAUTHORIZED_ACCESS)
+
+  SEVERITY: CRITICAL (P1)
+  IMPACT: Customer data may be compromised
+  RTO: < 1 hour
+  RPO: < 1 minute
+  
+  DETECTION:
+    Alert: Unusual access pattern detected
+    Example:
+      User@[attacker_ip] accessed 500 customers' invoices in 5 minutes
+      (Unusual: normally 1 customer per user, 10 requests per hour)
+  
+  IMMEDIATE_RESPONSE (0-5 minutes):
+    
+    1. Declare incident (P1, security team)
+       War room: #security-incidents channel (private)
+       Notify: CISO + Security team + Tech Lead
+       Threat level: Assess exposure
+    
+    2. Identify compromised account
+       Attacker IP: 192.0.2.123
+       Compromised user: customer_a@example.com
+       Token used: JWT with customer_a in claims
+       
+       Questions:
+         - How did attacker get user credentials?
+         - Did they use MFA? (no, MFA not enabled for this user)
+         - Did they use API key or JWT?
+    
+    3. Immediate containment (block attacker)
+       
+       Action 1: Revoke compromised session
+         $ UPDATE sessions SET revoked=true WHERE user_id='customer_a'
+         Effect: All active sessions for this user killed
+       
+       Action 2: Block attacker IP
+         $ aws wafv2 create-ip-set \
+           --name attacker-ips \
+           --scope REGIONAL \
+           --ip-address-version IPV4 \
+           --addresses 192.0.2.123/32
+         Effect: All requests from attacker IP rejected (403)
+       
+       Action 3: Force password reset
+         $ UPDATE users SET password_reset_required=true 
+           WHERE id='customer_a'
+         Effect: User must reset password before next login
+       
+       Action 4: Enable MFA requirement
+         $ UPDATE users SET mfa_required=true 
+           WHERE id='customer_a'
+         Effect: User must enroll MFA before next login
+       
+       Action 5: Audit log query (what did attacker access?)
+         SELECT * FROM audit_logs 
+         WHERE user_id='customer_a' 
+         AND created_at > now() - interval '24 hours'
+         Result: 2,847 unauthorized API calls in 3 hours
+         Accessed: 500 customer records (cross-tenant!)
+
+  INVESTIGATION (hours 1-2):
+    
+    4. Forensic analysis
+       
+       Questions:
+         - Which records were accessed?
+         - Were records modified or just read?
+         - How much data was exfiltrated?
+       
+       Analysis:
+         Accessed records: 500 customers' invoices (financial data)
+         Modified records: 0 (attacker only read)
+         Exfiltration: Possibly downloaded via API export
+         Timeframe: 3 hours (3:00 PM - 6:00 PM UTC)
+       
+       Exposure assessment:
+         Data_affected:
+           - 500 customers' invoice amounts
+           - 500 customers' email addresses
+           - 500 customers' company names
+         Data_NOT_affected:
+           - Passwords (hashed, inaccessible)
+           - API keys (never transmitted)
+           - Credit card numbers (stored in Stripe, not accessible)
+       
+       Breach_class: MEDIUM (PII exposed, but not payment info)
+    
+    5. Contain breach (prevent further access)
+       
+       Action: Rotate all customer API keys
+         - Send email to all 500 customers
+         - "Your API key may have been compromised"
+         - "We've revoked old key, generated new key"
+         - "Please update your integrations"
+       
+       Action: Audit access across all accounts
+         - Run automated script: For each customer, check for unauthorized access
+         - Most customers: 0 unauthorized access (good)
+         - 15 customers: Also accessed by same attacker IP
+         - Contain: Revoke sessions, block IP for those accounts too
+
+  NOTIFICATION (hour 2):
+    
+    6. Notify customers
+       
+       Email_template:
+         Subject: "Important Security Notice - Action Required"
+         Body: |
+           Dear [Customer Name],
+           
+           We've detected unauthorized access to your account on [date/time].
+           
+           What happened:
+           - Someone accessed your invoice data using your login credentials
+           - We don't believe payment information was accessed
+           - We've immediately revoked the session and forced password reset
+           
+           What we've done:
+           - Rotated your API keys
+           - Blocked attacker IP globally
+           - Enabled MFA requirement for your account
+           
+           What you should do:
+           1. Reset your password: [link]
+           2. Enable MFA: [link]
+           3. Review API integrations and regenerate keys
+           4. Contact support if you see suspicious activity
+           
+           We sincerely apologize for this incident.
+           
+           Security Team
+       
+       Notification_method:
+         - Email (primary)
+         - SMS (if phone on file)
+         - In-app notification (dashboard banner)
+         - Phone call (for enterprise customers)
+       
+       Timing: Within 2 hours of incident detection
+       Compliance: Notification required by GDPR (Article 33), DPDP Act 2023
+    
+    7. Public disclosure (if applicable)
+       
+       Notification to authorities:
+         - If breach affects > 100 users: Notify relevant data protection authority
+         - GDPR (EU): Ireland DPC
+         - DPDP (India): Data Protection Board
+         - Notification requirement: Within 72 hours
+       
+       Public statement:
+         - Post to status page
+         - Announce on Twitter
+         - Brief press (if major breach)
+         - Be transparent: What happened, what we did, what customers should do
+
+  PREVENTION (within 1 week):
+    
+    8. Implement security improvements
+       
+       Improvement 1: MFA enforcement
+         - MFA mandatory for all users (Account Owner)
+         - MFA optional but recommended (Team Members)
+         - Audit: Check compliance
+       
+       Improvement 2: Strengthen monitoring
+         - Detect unusual access patterns (ML-based)
+         - Alert on: Rapid API access, cross-tenant access attempts
+         - Auto-block: Obvious attack patterns (>100 requests/min)
+       
+       Improvement 3: API rate limiting by API key
+         - Limit per API key (not just per customer)
+         - Prevent bulk data export in single session
+       
+       Improvement 4: Encryption at rest for sensitive data
+         - Email addresses: AES-256-GCM
+         - Phone numbers: AES-256-GCM
+         - Financial data: AES-256-GCM
+       
+       Improvement 5: Audit log immutability
+         - Prevent deletion of audit logs
+         - Sign with cryptographic hash (detect tampering)
+       
+       Implementation_timeline:
+         - MFA enforcement: Within 48 hours (P0)
+         - Monitoring: Within 1 week (P0)
+         - Rate limiting: Within 1 week (P1)
+         - Encryption: Within 2 weeks (P1)
+         - Immutable logging: Within 1 month (P2)
+    
+    9. Post-incident review (within 1 week)
+       
+       Questions:
+         - How did attacker get credentials? (phishing? database leak?)
+         - Why wasn't MFA enabled?
+         - Why wasn't unusual access detected?
+         - How can we prevent similar breaches?
+       
+       Findings:
+         - Attacker likely obtained credentials from another service (LinkedIn breach)
+         - MFA not enabled: User's choice (we should force it)
+         - No anomaly detection: Gap in monitoring
+         - No rate limiting: Gap in API protection
+       
+       Action_items:
+         1. Implement MFA enforcement (see above)
+         2. Implement anomaly detection (see above)
+         3. Educate users: Password reuse risk
+         4. Offer password manager (1Password, Bitwarden)
+         5. Annual security awareness training
+       
+       Documentation:
+         - Incident report (detailed, for compliance)
+         - Timeline (minute-by-minute)
+         - Forensics (what was accessed, by whom)
+         - Notifications sent (to customers, authorities)
+         - Improvements implemented (with dates)
+         
